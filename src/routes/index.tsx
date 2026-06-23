@@ -39,10 +39,11 @@ function Dashboard() {
   const [tf, setTf] = useState<"M1" | "M5" | "M15">("M1");
   const [modalOpen, setModalOpen] = useState(true);
   const [seconds, setSeconds] = useState(42);
-  const [now, setNow] = useState(new Date());
+  const [now, setNow] = useState<Date | null>(null);
   const [chartTab, setChartTab] = useState<"grafico" | "estrutura">("grafico");
 
   useEffect(() => {
+    setNow(new Date());
     const t = setInterval(() => {
       setNow(new Date());
       setSeconds((s) => (s > 0 ? s - 1 : 60));
@@ -120,7 +121,7 @@ function Dashboard() {
               MERCADO ABERTO
             </span>
             <span className="text-muted-foreground">
-              {now.toLocaleDateString("pt-BR")} {now.toLocaleTimeString("pt-BR")}
+              {now ? `${now.toLocaleDateString("pt-BR")} ${now.toLocaleTimeString("pt-BR")}` : "—"}
             </span>
           </div>
           <div className="flex items-center gap-3 text-muted-foreground">
