@@ -68,7 +68,7 @@
   --border: oklch(0.29 0.018 220);
   --input: oklch(0.235 0.018 220);
   --ring: oklch(0.78 0.19 155);
-  --sidebar: oklch(0.14 0.015 220);
+  --sidebar: oklch(0.155 0.015 220);
   --sidebar-foreground: oklch(0.88 0.01 220);
   --sidebar-accent: oklch(0.22 0.05 155 / 0.22);
 }
