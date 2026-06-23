@@ -121,7 +121,7 @@ function Dashboard() {
               MERCADO ABERTO
             </span>
             <span className="text-muted-foreground">
-              {now.toLocaleDateString("pt-BR")} {now.toLocaleTimeString("pt-BR")}
+              {now ? `${now.toLocaleDateString("pt-BR")} ${now.toLocaleTimeString("pt-BR")}` : "—"}
             </span>
           </div>
           <div className="flex items-center gap-3 text-muted-foreground">
