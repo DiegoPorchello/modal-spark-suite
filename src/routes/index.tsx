@@ -346,14 +346,14 @@ function AnalysisPanel({ chartTab, setChartTab }: { chartTab: "grafico" | "estru
 }
 
 function CandleChart() {
-  // Static-ish candle SVG
+  // Static-ish candle SVG with deterministic rounded coordinates
   const candles = Array.from({ length: 26 }).map((_, i) => {
-    const seed = Math.sin(i * 1.7) * 0.5 + 0.5;
+    const seed = +(Math.sin(i * 1.7) * 0.5 + 0.5).toFixed(3);
     const up = Math.sin(i * 0.9) > -0.1;
-    const o = 40 + seed * 60;
-    const c = up ? o + 8 + seed * 14 : o - 8 - seed * 14;
-    const h = Math.min(o, c) - 4 - seed * 6;
-    const l = Math.max(o, c) + 4 + seed * 6;
+    const o = +(40 + seed * 60).toFixed(2);
+    const c = up ? +(o + 8 + seed * 14).toFixed(2) : +(o - 8 - seed * 14).toFixed(2);
+    const h = +(Math.min(o, c) - 4 - seed * 6).toFixed(2);
+    const l = +(Math.max(o, c) + 4 + seed * 6).toFixed(2);
     return { x: 10 + i * 14, o, c, h, l, up };
   });
   return (
