@@ -1,0 +1,21 @@
+@echo off
+title Puma Broker — Encerrando...
+color 0C
+
+echo.
+echo  ╔══════════════════════════════════════════╗
+echo  ║        PUMA BROKER — STOP                ║
+echo  ╚══════════════════════════════════════════╝
+echo.
+
+echo  Encerrando processos Python (daemon + proxy)...
+taskkill /f /im python.exe >nul 2>&1
+taskkill /f /im python3.exe >nul 2>&1
+
+echo  Encerrando Node.js (frontend)...
+taskkill /f /im node.exe >nul 2>&1
+
+echo.
+echo  ✅ Todos os processos encerrados.
+echo.
+pause

@@ -1,9 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { useBroker } from "../hooks/useBroker";
+import { useRobot } from "../hooks/useRobot";
 import {
   LayoutDashboard, TrendingUp, Activity, BookOpen, Trophy, History,
   Calculator, FlaskConical, Plug, Settings, HelpCircle, Menu, Bell,
-  Maximize2, User, X, ArrowUp, ArrowDown, Check, Circle,
+  Maximize2, User, X, ArrowUp, Check, Circle, AlertTriangle, Eye, EyeOff,
 } from "lucide-react";
 
 export const Route = createFileRoute("/")({
@@ -60,7 +62,7 @@ function Dashboard() {
             <Activity className="size-5 text-success" />
           </div>
           <div>
-            <div className="font-semibold tracking-wide text-success">NEXOR AI</div>
+            <div className="font-semibold tracking-wide text-success">ORION</div>
             <div className="text-[10px] text-muted-foreground tracking-widest">FLUXO DE CONTINUIDADE PRO</div>
           </div>
         </div>
@@ -143,9 +145,8 @@ function Dashboard() {
 
         {/* Content */}
         <main className="flex-1 overflow-auto p-5 space-y-5">
-          {/* Top metrics row */}
-          <section className="grid grid-cols-12 gap-4">
-            <BrokerCard />
+          {/* Top metrics row - acima do broker */}
+          <section className="flex gap-4 flex-wrap">
             <Metric label="ATIVO OPERADO" value="EUR/USD" flag="🇪🇺" sub="" />
             <Metric label="TIMEFRAME" value="M1" sub="Expiração 1 min" />
             <Metric label="SCORE ATUAL" value="92" badge="PREMIUM" />
@@ -155,18 +156,26 @@ function Dashboard() {
             <Metric label="WINS / LOSS" value="19 / 7" sub="73%" accent />
             <Metric label="STATUS DO ROBÔ" value="OPERANDO" sub="Automático" status />
           </section>
+          {/* Broker + Financeiro + Historico */}
+          <section className="grid grid-cols-12 gap-4">
+            <BrokerCard />
+            <FinancePanel />
+            <HistoryPanel />
+          </section>
 
           {/* Analysis row */}
           <section className="grid grid-cols-12 gap-4">
             <AnalysisPanel chartTab={chartTab} setChartTab={setChartTab} />
-            <RankingPanel />
           </section>
 
-          {/* Bottom row */}
+          {/* Calculator row */}
           <section className="grid grid-cols-12 gap-4">
             <CalcPanel />
-            <FinancePanel />
-            <HistoryPanel />
+          </section>
+
+          {/* Ranking row */}
+          <section className="grid grid-cols-12 gap-4">
+            <RankingPanel />
           </section>
 
           {/* Status bar */}
@@ -204,8 +213,120 @@ function Dashboard() {
 /* ---------------- subcomponents ---------------- */
 
 function BrokerCard() {
+  const { connected, connecting, balance, userName, credentials, error: brokerError, login, logout } = useBroker();
+
+  if (connecting) {
+    return (
+      <div className="panel col-span-2 p-4">
+        <div className="text-[10px] tracking-widest text-muted-foreground mb-3">CONEXÃO PUMA BROKER</div>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <div className="size-9 rounded-full bg-warning/20 border border-warning/40 flex items-center justify-center text-warning font-bold">P</div>
+            <div>
+              <div className="text-sm font-bold">PUMA</div>
+              <div className="text-[10px] text-muted-foreground">BROKER</div>
+            </div>
+          </div>
+          <span className="text-[10px] text-warning flex items-center gap-1 bg-warning/10 px-2 py-1 rounded">
+            <span className="size-1.5 rounded-full bg-warning animate-pulse" /> CONECTANDO
+          </span>
+        </div>
+        <div className="text-xs text-muted-foreground text-center py-4">Conectando ao servidor...</div>
+      </div>
+    );
+  }
+
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginAccountType, setLoginAccountType] = useState<"demo" | "real">("demo");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+
+  if (!connected) {
+    const handleLogin = async () => {
+      if (!loginEmail || !loginPassword) {
+        setLoginError("Preencha email e senha");
+        return;
+      }
+      setLoginError(null);
+      setLoggingIn(true);
+      try {
+        await login({
+          username: loginEmail,
+          password: loginPassword,
+          accountType: loginAccountType,
+          serverUrl: "http://127.0.0.1:3001",
+          keepConnected: false,
+        });
+      } catch (err) {
+        setLoginError(err instanceof Error ? err.message : "Falha na conexão");
+      } finally {
+        setLoggingIn(false);
+      }
+    };
+
+    return (
+      <div className="panel col-span-2 p-4">
+        <div className="text-[10px] tracking-widest text-muted-foreground mb-3">CONEXÃO PUMA BROKER</div>
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <div className="size-9 rounded-full bg-danger/20 border border-danger/40 flex items-center justify-center text-danger font-bold">P</div>
+            <div>
+              <div className="text-sm font-bold">PUMA</div>
+              <div className="text-[10px] text-muted-foreground">BROKER</div>
+            </div>
+          </div>
+          <span className="text-[10px] text-danger flex items-center gap-1 bg-danger/10 px-2 py-1 rounded">
+            <span className="size-1.5 rounded-full bg-danger" /> DESCONECTADO
+          </span>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Email</label>
+            <input type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} placeholder="email@exemplo.com" className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm focus:border-info focus:outline-none" />
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Senha</label>
+            <div className="relative">
+              <input type={showPassword ? "text" : "password"} value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} placeholder="••••••••" className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm pr-9 focus:border-info focus:outline-none" />
+              <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              </button>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground block mb-1">Tipo de conta</label>
+            <div className="flex gap-2 mt-1">
+              {[{ key: "demo" as const, label: "Demo" }, { key: "real" as const, label: "Real" }].map((opt) => (
+                <button key={opt.key} onClick={() => setLoginAccountType(opt.key)} className={`px-4 py-2 rounded-md text-sm border transition-colors ${loginAccountType === opt.key ? "bg-info/20 border-info/50 text-info" : "bg-background border-border text-muted-foreground hover:border-info/30"}`}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {loginError && (
+            <div className="text-xs text-danger flex items-center gap-2">
+              <AlertTriangle className="size-3.5 shrink-0" />
+              <span>{loginError}</span>
+            </div>
+          )}
+          <button onClick={handleLogin} disabled={loggingIn} className="w-full py-2 rounded-md bg-success text-success-foreground text-xs font-semibold tracking-wider hover:bg-success/90 disabled:opacity-50">
+            {loggingIn ? "CONECTANDO..." : "CONECTAR"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const saldo = balance
+    ? (credentials?.accountType === "demo" ? balance.demoBalance : balance.balance)
+    : 0;
+  const fmtSaldo = saldo.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  const tipoConta = credentials?.accountType === "demo" ? "Conta Demo" : "Conta Real";
+
   return (
-    <div className="panel col-span-3 p-4">
+    <div className="panel col-span-2 p-4">
       <div className="text-[10px] tracking-widest text-muted-foreground mb-3">CONEXÃO PUMA BROKER</div>
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
@@ -220,12 +341,14 @@ function BrokerCard() {
         </span>
       </div>
       <div className="space-y-1.5 text-xs">
-        <Row k="Conta" v="Conta Real" />
-        <Row k="Usuário" v="nexor.trader" />
-        <Row k="Saldo" v="R$ 1.251,93" />
-        <Row k="Servidor" v="PumaPro-Demo" />
+        <Row k="Conta" v={tipoConta} />
+        <Row k="Usuário" v={userName ?? "—"} />
+        <Row k="Saldo" v={fmtSaldo} />
       </div>
-      <button className="w-full mt-4 py-2 rounded-md border border-border text-xs font-semibold tracking-wide hover:bg-accent">
+      <button
+        onClick={logout}
+        className="w-full mt-4 py-2 rounded-md border border-border text-xs font-semibold tracking-wide hover:bg-accent"
+      >
         DESCONECTAR
       </button>
     </div>
@@ -245,15 +368,27 @@ function Metric({
   label, value, sub, badge, flag, accent, status,
 }: { label: string; value: string; sub?: string; badge?: string; flag?: string; accent?: boolean; status?: boolean }) {
   return (
-    <div className="panel col-span-1 p-3 min-w-0" style={{ gridColumn: "span 1 / span 1" }}>
-      <div className="text-[9px] tracking-widest text-muted-foreground mb-2">{label}</div>
-      <div className="flex items-baseline gap-1">
-        {flag && <span className="text-base">{flag}</span>}
-        {status && <span className="size-2 rounded-full bg-success animate-pulse mr-1" />}
-        <span className={`text-base font-bold truncate ${accent || status ? "text-success" : ""}`}>{value}</span>
-        {badge && <span className="text-[9px] bg-success/15 text-success px-1.5 py-0.5 rounded font-semibold ml-1">{badge}</span>}
+    <div className={`panel flex-1 min-w-0 p-3 border-l-[3px] ${accent ? "border-l-success" : status ? "border-l-success" : "border-l-border"}`}>
+      <div className="text-[10px] font-semibold tracking-widest text-muted-foreground mb-2 flex items-center gap-1.5">
+        {flag && <span className="text-sm">{flag}</span>}
+        {label}
       </div>
-      {sub && <div className="text-[10px] text-muted-foreground mt-1">{sub}</div>}
+      <div className="flex items-center gap-2">
+        {status && <span className="size-2.5 rounded-full bg-success animate-pulse shrink-0" />}
+        <span className={`text-lg font-extrabold tracking-tight truncate ${accent && value.startsWith("+") ? "text-success" : accent && value.startsWith("-") ? "text-danger" : accent || status ? "text-success" : "text-foreground"}`}>
+          {value}
+        </span>
+        {badge && (
+          <span className="text-[10px] bg-success/15 text-success px-2 py-0.5 rounded-full font-bold tracking-wider shrink-0">
+            {badge}
+          </span>
+        )}
+      </div>
+      {sub && (
+        <div className={`text-[11px] mt-1.5 font-medium ${sub.startsWith("+") ? "text-success" : sub.startsWith("-") ? "text-danger" : "text-muted-foreground"}`}>
+          {sub}
+        </div>
+      )}
     </div>
   );
 }
@@ -275,7 +410,7 @@ function AnalysisPanel({ chartTab, setChartTab }: { chartTab: "grafico" | "estru
     { label: "Horário Favorável", ok: true },
   ];
   return (
-    <div className="panel col-span-8 p-4">
+    <div className="panel col-span-12 p-4">
       <div className="flex items-center gap-2 mb-4">
         <Activity className="size-4 text-success" />
         <h3 className="text-sm font-semibold tracking-wide">ANÁLISE DO ROBÔ - FLUXO DE CONTINUIDADE PRO</h3>
@@ -399,7 +534,7 @@ function RankingPanel() {
     { rank: 10, asset: "NZD/USD OTC", flag: "🇳🇿", score: 70, wr: "53%", ops: 15 },
   ];
   return (
-    <div className="panel col-span-4 p-4">
+    <div className="panel col-span-12 p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold flex items-center gap-2"><Trophy className="size-4 text-success" />RANKING DE ATIVOS (M1)</h3>
         <span className="text-[10px] text-muted-foreground">Atualizado: 09:42:18</span>
@@ -430,32 +565,36 @@ function RankingPanel() {
 }
 
 function CalcPanel() {
-  const levels = [
-    { n: 0, e1: "R$ 4,57", e2: "R$ 8,45", v: "R$ 11,07", s: "R$ 11,07" },
-    { n: 1, e1: "R$ 2,00", e2: "R$ 3,70", v: "R$ 4,84", s: "R$ 4,84" },
-    { n: 2, e1: "R$ 2,72", e2: "R$ 5,03", v: "R$ 6,59", s: "R$ 6,59" },
-    { n: 3, e1: "R$ 3,84", e2: "R$ 7,10", v: "R$ 9,30", s: "R$ 0,00", active: true },
-    { n: 4, e1: "R$ 5,43", e2: "R$ 10,05", v: "R$ 13,16", s: "R$ 0,00" },
-    { n: 5, e1: "R$ 7,67", e2: "R$ 14,19", v: "R$ 18,58", s: "R$ 0,00" },
-    { n: 6, e1: "R$ 10,83", e2: "R$ 20,04", v: "R$ 26,24", s: "R$ 0,00" },
-  ];
+  const { engine, state } = useRobot();
+  const tableRows = engine?.getTableRows() ?? [];
+  const sreState = engine?.getSREState() ?? null;
+  const nivelAtual = sreState?.currentLevel ?? state.currentRecoveryStep;
+  const entryNumber = sreState?.entryNumber ?? state.entryNumber;
+  const phase = sreState?.phase ?? "IDLE";
+  const faseLabel = phase === "ENTRY_1" ? `Entry ${entryNumber}/1` : phase === "SOROS" ? `SOROS Entry ${entryNumber}/2` : phase;
+  const meta = state.config.targetProfit;
+  const stop = state.config.stopLoss;
+
   return (
-    <div className="panel col-span-5 p-4">
+    <div className="panel col-span-12 p-4">
       <h3 className="text-sm font-semibold mb-3 flex items-center gap-2"><Calculator className="size-4 text-success" />CALCULADORA SOROSGALE - NÍVEL ATUAL</h3>
       <div className="grid grid-cols-12 gap-3">
         <div className="col-span-3 space-y-3">
-          <Stat title="NÍVEL ATUAL" value="3" big />
+          <Stat title="NÍVEL ATUAL" value={String(nivelAtual)} big />
           <div>
             <div className="text-[10px] text-muted-foreground tracking-widest">ESTRATÉGIA</div>
             <div className="text-xs font-semibold">Sorosgale Fracionado</div>
           </div>
           <div>
             <div className="text-[10px] text-muted-foreground tracking-widest">STATUS</div>
-            <div className="text-xs text-success flex items-center gap-1"><span className="size-1.5 rounded-full bg-success" />OPERANDO</div>
+            <div className={`text-xs flex items-center gap-1 ${state.status === "running" ? "text-success" : "text-muted-foreground"}`}>
+              <span className={`size-1.5 rounded-full ${state.status === "running" ? "bg-success" : "bg-muted-foreground"}`} />
+              {faseLabel}
+            </div>
           </div>
           <div>
             <div className="text-[10px] text-muted-foreground tracking-widest">META / STOP</div>
-            <div className="text-xs">R$ 100,00 / R$ 200,00</div>
+            <div className="text-xs">{meta.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })} / {stop.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</div>
           </div>
         </div>
         <div className="col-span-9 overflow-x-auto">
@@ -470,15 +609,29 @@ function CalcPanel() {
               </tr>
             </thead>
             <tbody>
-              {levels.map((l) => (
-                <tr key={l.n} className={`border-b border-border ${l.active ? "bg-success/10" : ""}`}>
-                  <td className="py-2 font-bold">{l.n}</td>
-                  <td className={l.active ? "text-success" : ""}>{l.e1}</td>
-                  <td className={l.active ? "text-success" : ""}>{l.e2}</td>
-                  <td className={l.active ? "text-success" : ""}>{l.v}</td>
-                  <td className={l.s === "R$ 0,00" ? "text-muted-foreground" : "text-success"}>{l.s}</td>
+              {tableRows.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-4 text-center text-xs text-muted-foreground">Inicie o robô para gerar a tabela</td>
                 </tr>
-              ))}
+              )}
+              {tableRows.map((l) => {
+                const isActive = l.level === nivelAtual;
+                const e1 = l.entry1.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+                const e2 = l.entry2.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+                const total = (l.entry1 + l.entry2).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+                const accLoss = l.accLossBefore > 0
+                  ? l.accLossBefore.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+                  : "R$ 0,00";
+                return (
+                  <tr key={l.level} className={`border-b border-border ${isActive ? "bg-success/10" : ""}`}>
+                    <td className="py-2 font-bold">{l.level}</td>
+                    <td className={isActive ? "text-success" : ""}>{e1}</td>
+                    <td className={isActive ? "text-success" : ""}>{e2}</td>
+                    <td className={isActive ? "text-success" : ""}>{total}</td>
+                    <td className={l.accLossBefore > 0 ? "text-success" : "text-muted-foreground"}>{accLoss}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -497,16 +650,23 @@ function Stat({ title, value, big }: { title: string; value: string; big?: boole
 }
 
 function FinancePanel() {
+  const { state } = useRobot();
+  const totalOps = state.totalWins + state.totalLosses;
+  const prejuizoAcumulado = state.operations
+    .filter((o) => o.result === "loss" && o.status === "completed")
+    .reduce((s, o) => s + Math.abs(o.profit), 0);
+
   const rows = [
-    { k: "BANCA INICIAL", v: "R$ 1.000,00" },
-    { k: "BANCA ATUAL", v: "R$ 1.251,93", c: "text-success" },
-    { k: "PREJUÍZO ACUMULADO", v: "R$ 15,30", c: "text-danger" },
-    { k: "LUCRO DA SESSÃO", v: "R$ 231,45", c: "text-success" },
-    { k: "WIN RATE", v: "73%" },
-    { k: "NÚMERO DE OPERAÇÕES", v: "26" },
+    { k: "BANCA INICIAL", v: state.initialBankroll.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }) },
+    { k: "BANCA ATUAL", v: state.currentBankroll.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }), c: state.sessionProfit >= 0 ? "text-success" : "text-danger" },
+    { k: "PREJUÍZO ACUMULADO", v: prejuizoAcumulado.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }), c: "text-danger" },
+    { k: "LUCRO DA SESSÃO", v: (state.sessionProfit >= 0 ? "+" : "") + state.sessionProfit.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }), c: state.sessionProfit >= 0 ? "text-success" : "text-danger" },
+    { k: "WIN RATE", v: `${state.winRate.toFixed(1)}%`, c: state.winRate >= 50 ? "text-success" : "text-danger" },
+    { k: "NÚMERO DE OPERAÇÕES", v: String(totalOps) },
   ];
+
   return (
-    <div className="panel col-span-3 p-4">
+    <div className="panel col-span-2 p-4">
       <h3 className="text-sm font-semibold mb-3">RESUMO FINANCEIRO</h3>
       <div className="space-y-2.5">
         {rows.map((r) => (
@@ -522,29 +682,36 @@ function FinancePanel() {
 }
 
 function HistoryPanel() {
-  const rows = [
-    { t: "09:41", a: "EUR/USD OTC", d: "CALL", r: "WIN", v: "+R$ 7,10" },
-    { t: "09:39", a: "GBP/USD OTC", d: "PUT", r: "WIN", v: "+R$ 3,70" },
-    { t: "09:37", a: "BTC/USDT OTC", d: "CALL", r: "LOSS", v: "-R$ 3,84" },
-    { t: "09:35", a: "EUR/USD OTC", d: "CALL", r: "WIN", v: "+R$ 5,43" },
-    { t: "09:33", a: "AUD/USD OTC", d: "PUT", r: "LOSS", v: "-R$ 2,72" },
-  ];
+  const { state } = useRobot();
+  const completedOps = state.operations
+    .filter((o) => o.status === "completed")
+    .slice(0, 5);
+
   return (
-    <div className="panel col-span-4 p-4">
+    <div className="panel col-span-8 p-4">
       <div className="flex justify-between items-center mb-3">
         <h3 className="text-sm font-semibold">HISTÓRICO RECENTE</h3>
         <button className="text-[10px] text-success hover:underline">VER TODAS</button>
       </div>
       <div className="space-y-2">
-        {rows.map((r, i) => (
-          <div key={i} className="grid grid-cols-5 gap-2 text-xs items-center bg-secondary/30 rounded px-3 py-2">
-            <span className="text-muted-foreground font-mono">{r.t}</span>
-            <span className="col-span-1 truncate">{r.a}</span>
-            <span className={r.d === "CALL" ? "text-success font-semibold" : "text-danger font-semibold"}>{r.d}</span>
-            <span className={r.r === "WIN" ? "text-success" : "text-danger"}>{r.r}</span>
-            <span className={`text-right font-mono font-semibold ${r.v.startsWith("+") ? "text-success" : "text-danger"}`}>{r.v}</span>
-          </div>
-        ))}
+        {completedOps.length === 0 && (
+          <div className="text-xs text-muted-foreground text-center py-4">Nenhuma operação ainda</div>
+        )}
+        {completedOps.map((op) => {
+          const hora = new Date(op.openedAt).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+          const dir = op.direction.toUpperCase();
+          const res = op.result.toUpperCase();
+          const fmt = (op.profit >= 0 ? "+" : "") + op.profit.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+          return (
+            <div key={op.id} className="grid grid-cols-5 gap-2 text-xs items-center bg-secondary/30 rounded px-3 py-2">
+              <span className="text-muted-foreground font-mono">{hora}</span>
+              <span className="col-span-1 truncate">{op.asset}</span>
+              <span className={dir === "CALL" ? "text-success font-semibold" : "text-danger font-semibold"}>{dir}</span>
+              <span className={res === "WIN" ? "text-success" : "text-danger"}>{res}</span>
+              <span className={`text-right font-mono font-semibold ${op.profit >= 0 ? "text-success" : "text-danger"}`}>{fmt}</span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

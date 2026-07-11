@@ -11,6 +11,11 @@ import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
+import { BrokerProvider } from "../hooks/useBroker";
+import { RobotProvider } from "../hooks/useRobot";
+import { connectLoggerToDaemon } from "../engine/logger";
+
+
 
 function NotFoundComponent() {
   return (
@@ -77,18 +82,28 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "A dynamic micro-SaaS application that precisely replicates a provided visual design, featuring functional tabs and modal windows." },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "A dynamic micro-SaaS application that precisely replicates a provided visual design, featuring functional tabs and modal windows." },
+      { title: "Nexor AI · Fluxo de Continuidade Pro" },
+      {
+        name: "description",
+        content:
+          "Painel de operações automatizadas Nexor AI - Fluxo de Continuidade Pro com Smart Recovery.",
+      },
+      { name: "author", content: "Nexor AI" },
+      { property: "og:title", content: "Nexor AI · Fluxo de Continuidade Pro" },
+      {
+        property: "og:description",
+        content:
+          "Painel de operações automatizadas Nexor AI - Fluxo de Continuidade Pro com Smart Recovery.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
-      { name: "twitter:site", content: "@Lovable" },
-      { name: "twitter:title", content: "Lovable App" },
-      { name: "twitter:description", content: "A dynamic micro-SaaS application that precisely replicates a provided visual design, featuring functional tabs and modal windows." },
-      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/2ae640cd-1cba-4456-83ab-7e24848dc3bb/id-preview-28c488ae--27b28e07-3165-4572-bcb3-adc130591346.lovable.app-1782248334148.png" },
-      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/2ae640cd-1cba-4456-83ab-7e24848dc3bb/id-preview-28c488ae--27b28e07-3165-4572-bcb3-adc130591346.lovable.app-1782248334148.png" },
+      { name: "twitter:site", content: "@NexorAI" },
+      { name: "twitter:title", content: "Nexor AI · Fluxo de Continuidade Pro" },
+      {
+        name: "twitter:description",
+        content:
+          "Painel de operações automatizadas Nexor AI - Fluxo de Continuidade Pro com Smart Recovery.",
+      },
     ],
     links: [
       {
@@ -120,10 +135,19 @@ function RootShell({ children }: { children: ReactNode }) {
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
+  useEffect(() => {
+    const disconnect = connectLoggerToDaemon();
+    return disconnect;
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
+      <BrokerProvider>
+        <RobotProvider>
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+        </RobotProvider>
+      </BrokerProvider>
     </QueryClientProvider>
   );
 }
