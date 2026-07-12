@@ -102,13 +102,13 @@ export class CandleBuffer {
     }
 
     // Fase de preenchimento — insere na posição correta (gap-fill)
-    const existingIdx = candles.findIndex(c => c.time === candle.time);
+    const existingIdx = candles.findIndex((c) => c.time === candle.time);
     if (existingIdx >= 0) {
       candles[existingIdx] = candle;
       return isClosed;
     }
 
-    const insertIdx = candles.findIndex(c => c.time > candle.time);
+    const insertIdx = candles.findIndex((c) => c.time > candle.time);
     if (insertIdx === -1) {
       candles.push(candle);
     } else {

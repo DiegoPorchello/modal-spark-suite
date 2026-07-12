@@ -10,7 +10,14 @@ import {
   Circle,
 } from "lucide-react";
 
-type NavKey = "dashboard" | "mercado" | "historico" | "config" | "calculadora" | "copytrader" | "ajuda";
+type NavKey =
+  | "dashboard"
+  | "mercado"
+  | "historico"
+  | "config"
+  | "calculadora"
+  | "copytrader"
+  | "ajuda";
 
 const NAV: {
   section: string;
@@ -112,7 +119,9 @@ export function AppSidebar({ active, onNavigate, isOpen, robotState }: AppSideba
           <div className="flex justify-between">
             <span>Fonte de dados</span>
             <span className="text-foreground">
-              {robotState.sessionInfo?.dataSource === "puma-hybrid" ? "Puma Socket.IO" : "Binance WS"}
+              {robotState.sessionInfo?.dataSource === "puma-hybrid"
+                ? "Puma Socket.IO"
+                : "Binance WS"}
             </span>
           </div>
           <div className="flex justify-between">

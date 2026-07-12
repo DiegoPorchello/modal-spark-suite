@@ -37,41 +37,49 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export function useCopyTrade() {
-  return useMemo(() => ({
-    getStatus: async (): Promise<CopyStatus> => {
-      const data = await apiFetch<{ enabled: boolean; accounts: CopyAccount[] }>("/copy/status");
-      return data;
-    },
-    getAccounts: async (): Promise<CopyAccount[]> => {
-      const data = await apiFetch<{ accounts: CopyAccount[] }>("/copy/accounts");
-      return data.accounts;
-    },
-    addAccount: async (
-      label: string,
-      email: string,
-      password: string,
-      isDemo: boolean,
-    ): Promise<CopyAccount> => {
-      return apiFetch<CopyAccount>("/copy/accounts", {
-        method: "POST",
-        body: JSON.stringify({ label, email, password, is_demo: isDemo }),
-      });
-    },
-    removeAccount: async (id: string): Promise<void> => {
-      await apiFetch(`/copy/accounts/${id}`, { method: "DELETE" });
-    },
-    toggleAccount: async (id: string): Promise<void> => {
-      await apiFetch(`/copy/accounts/${id}`, { method: "PATCH" });
-    },
-    toggleEnabled: async (): Promise<boolean> => {
-      const data = await apiFetch<{ enabled: boolean }>("/copy/accounts/toggle", { method: "PATCH" });
-      return data.enabled;
-    },
-    editAccount: async (id: string, data: { label?: string; active?: boolean; is_demo?: boolean }): Promise<void> => {
-      await apiFetch(`/copy/accounts/${id}`, {
-        method: "PATCH",
-        body: JSON.stringify(data),
-      });
-    },
-  }), []);
+  return useMemo(
+    () => ({
+      getStatus: async (): Promise<CopyStatus> => {
+        const data = await apiFetch<{ enabled: boolean; accounts: CopyAccount[] }>("/copy/status");
+        return data;
+      },
+      getAccounts: async (): Promise<CopyAccount[]> => {
+        const data = await apiFetch<{ accounts: CopyAccount[] }>("/copy/accounts");
+        return data.accounts;
+      },
+      addAccount: async (
+        label: string,
+        email: string,
+        password: string,
+        isDemo: boolean,
+      ): Promise<CopyAccount> => {
+        return apiFetch<CopyAccount>("/copy/accounts", {
+          method: "POST",
+          body: JSON.stringify({ label, email, password, is_demo: isDemo }),
+        });
+      },
+      removeAccount: async (id: string): Promise<void> => {
+        await apiFetch(`/copy/accounts/${id}`, { method: "DELETE" });
+      },
+      toggleAccount: async (id: string): Promise<void> => {
+        await apiFetch(`/copy/accounts/${id}`, { method: "PATCH" });
+      },
+      toggleEnabled: async (): Promise<boolean> => {
+        const data = await apiFetch<{ enabled: boolean }>("/copy/accounts/toggle", {
+          method: "PATCH",
+        });
+        return data.enabled;
+      },
+      editAccount: async (
+        id: string,
+        data: { label?: string; active?: boolean; is_demo?: boolean },
+      ): Promise<void> => {
+        await apiFetch(`/copy/accounts/${id}`, {
+          method: "PATCH",
+          body: JSON.stringify(data),
+        });
+      },
+    }),
+    [],
+  );
 }

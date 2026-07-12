@@ -1,4 +1,12 @@
-import { createContext, useContext, useState, useCallback, useRef, useEffect, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  type ReactNode,
+} from "react";
 import { useBroker } from "./useBroker";
 import { FlowRobotEngine } from "../engine/flow-robot-engine";
 import type {
@@ -62,16 +70,19 @@ const RobotContext = createContext<RobotContextValue>(null!);
 export function RobotProvider({ children }: { children: ReactNode }) {
   const { adapter } = useBroker();
   const engineRef = useRef<FlowRobotEngine | null>(null);
-
-  if (!engineRef.current) {
-    const engine = new FlowRobotEngine(adapter);
-    engineRef.current = engine;
-  }
-
-  const engine = engineRef.current;
-  const [state, setState] = useState<RobotState>(engine.state);
+  const [engine, setEngine] = useState<FlowRobotEngine | null>(null);
+  const [state, setState] = useState<RobotState>(createDefaultState());
 
   useEffect(() => {
+    if (adapter && !engineRef.current) {
+      engineRef.current = new FlowRobotEngine(adapter);
+      setEngine(engineRef.current);
+      setState(engineRef.current.state);
+    }
+  }, [adapter]);
+
+  useEffect(() => {
+    if (!engine) return;
     const unsub = engine.on((event: RobotEvent) => {
       setState({ ...event.state, operations: [...event.state.operations] });
     });
@@ -81,6 +92,7 @@ export function RobotProvider({ children }: { children: ReactNode }) {
   }, [engine]);
 
   useEffect(() => {
+    if (!engine) return;
     engine.loadPersistedOps();
   }, [engine]);
 

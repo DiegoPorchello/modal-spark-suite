@@ -232,7 +232,13 @@ export class DecisionEngine {
       dropped_open: candles.length - closedCandles.length,
     });
 
-    const HYBRID_PUMA_ASSETS = new Set(["BETHUSDT","BTSOLUSDT","MAPEUSDT","XRDOGUSDT","XRPSOLUSDT"]);
+    const HYBRID_PUMA_ASSETS = new Set([
+      "BETHUSDT",
+      "BTSOLUSDT",
+      "MAPEUSDT",
+      "XRDOGUSDT",
+      "XRPSOLUSDT",
+    ]);
     const minCandlesForAsset = HYBRID_PUMA_ASSETS.has(asset.toUpperCase()) ? 5 : 30;
     if (closedCandles.length < minCandlesForAsset) {
       engineLogger.error("DecisionEngine", `❌ ETAPA 1 FALHOU: Poucos dados`, {
@@ -364,7 +370,8 @@ export class DecisionEngine {
     // Score baixo = não operar (mas nunca bloquear por filtro individual)
     if (scoreBreakdown.total < minScore) {
       blockedReason =
-        scoreBreakdown.refusalReason ?? `Score ${scoreBreakdown.total}/100 — abaixo de ${minScore}${isCrypto ? " (crypto)" : ""}`;
+        scoreBreakdown.refusalReason ??
+        `Score ${scoreBreakdown.total}/100 — abaixo de ${minScore}${isCrypto ? " (crypto)" : ""}`;
       blockedRule = "LOW_SCORE";
       engineLogger.warn("DecisionEngine", `❌ ETAPA 4: RECUSADO — ${blockedReason}`, {
         total: scoreBreakdown.total,
@@ -433,7 +440,9 @@ export class DecisionEngine {
       probability: `${microReversal.probability}%`,
       passed: microReversal.passed,
       enabled: this.microReversalEnabled,
-      details: microReversal.details.filter((d) => d.startsWith("✔") || d.startsWith("◐") || d.includes("desativado")).join(", "),
+      details: microReversal.details
+        .filter((d) => d.startsWith("✔") || d.startsWith("◐") || d.includes("desativado"))
+        .join(", "),
     });
 
     if (direction && !microReversal.passed) {
@@ -445,7 +454,10 @@ export class DecisionEngine {
         threshold: MicroReversalEngine.BLOCK_THRESHOLD,
       });
     } else if (direction) {
-      engineLogger.info("DecisionEngine", `✅ ETAPA 4B: MicroReversal liberado (${microReversal.probability}% < ${MicroReversalEngine.BLOCK_THRESHOLD}%)`);
+      engineLogger.info(
+        "DecisionEngine",
+        `✅ ETAPA 4B: MicroReversal liberado (${microReversal.probability}% < ${MicroReversalEngine.BLOCK_THRESHOLD}%)`,
+      );
     }
 
     // ══ ETAPA 4C: Trend Veto (se score de tendência for muito baixo, não opera) ══
@@ -465,7 +477,10 @@ export class DecisionEngine {
       direction = null;
       engineLogger.warn("DecisionEngine", `❌ ETAPA 4D: BLOQUEADO — ${blockedReason}`);
     } else if (direction) {
-      engineLogger.info("DecisionEngine", `✅ ETAPA 4D: Momentum liberado (ADX ${momentum.adx.toFixed(1)} >= 20)`);
+      engineLogger.info(
+        "DecisionEngine",
+        `✅ ETAPA 4D: Momentum liberado (ADX ${momentum.adx.toFixed(1)} >= 20)`,
+      );
     }
 
     // ══ ETAPA 5: Relatório final ══
@@ -745,7 +760,11 @@ export class DecisionEngine {
       priceAction,
       smartMoney,
       momentum,
-      microReversal: { probability: 0, passed: true, details: ["Sem análise — dados insuficientes"] },
+      microReversal: {
+        probability: 0,
+        passed: true,
+        details: ["Sem análise — dados insuficientes"],
+      },
       timestamp,
       asset,
       log: `[BLOCKED] ${reason}`,

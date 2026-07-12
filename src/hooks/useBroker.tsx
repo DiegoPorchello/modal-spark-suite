@@ -7,52 +7,82 @@
  * NUNCA utiliza tokens antigos.
  */
 
-import { createContext, useContext, useState, useCallback, useRef, useEffect, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  type ReactNode,
+} from "react";
 import { PumaBrokerAdapter } from "../broker/puma-broker-adapter";
 import type { AccountBalance } from "../broker/types";
 
 export interface BrokerCredentials {
-  serverUrl: string;
   username: string;
   password: string;
-  accountType: "real" | "demo";
+  accountType: "demo" | "real";
+  serverUrl: string;
   keepConnected: boolean;
 }
 
+export interface CriticalAuthError {
+  message: string;
+  source: string;
+  originalError: string;
+  timestamp: string;
+}
+
 interface BrokerContextValue {
-  adapter: PumaBrokerAdapter;
+  adapter: PumaBrokerAdapter | null;
   connected: boolean;
   connecting: boolean;
   credentials: BrokerCredentials | null;
   balance: AccountBalance | null;
   error: string | null;
   userName: string | null;
+  criticalAuthError: CriticalAuthError | null;
   login: (creds: BrokerCredentials) => Promise<void>;
   logout: () => Promise<void>;
   updateServerUrl: (url: string) => void;
   clearError: () => void;
+  clearCriticalAuthError: () => void;
+  triggerCriticalAuthError: (error: Omit<CriticalAuthError, "timestamp">) => void;
 }
 
 const BrokerContext = createContext<BrokerContextValue | null>(null);
 
 export function BrokerProvider({ children }: { children: ReactNode }) {
-  const adapterRef = useRef<PumaBrokerAdapter>(null!);
-  if (!adapterRef.current) {
-    adapterRef.current = new PumaBrokerAdapter();
-  }
-  const adapter = adapterRef.current;
+  const adapterRef = useRef<PumaBrokerAdapter | null>(null);
+  const [adapter, setAdapter] = useState<PumaBrokerAdapter | null>(null);
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [credentials, setCredentials] = useState<BrokerCredentials | null>(null);
   const [balance, setBalance] = useState<AccountBalance | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [userName, setUserName] = useState<string | null>(null);
+  const [criticalAuthError, setCriticalAuthError] = useState<CriticalAuthError | null>(null);
+
+  useEffect(() => {
+    adapterRef.current = new PumaBrokerAdapter();
+    setAdapter(adapterRef.current);
+  }, []);
+
+  const clearCriticalAuthError = useCallback(() => setCriticalAuthError(null), []);
+
+  const triggerCriticalAuthError = useCallback((error: Omit<CriticalAuthError, "timestamp">) => {
+    const timestamp = new Date().toISOString();
+    setCriticalAuthError({ ...error, timestamp });
+  }, []);
 
   // NENHUMA restauração automática de credenciais.
   // Token JWT é obtido EXCLUSIVAMENTE do login atual.
 
   const login = useCallback(
     async (creds: BrokerCredentials) => {
+      if (!adapter) return;
+      if (connecting) return; // já está conectando
       setConnecting(true);
       setError(null);
 
@@ -74,10 +104,11 @@ export function BrokerProvider({ children }: { children: ReactNode }) {
         setConnecting(false);
       }
     },
-    [adapter],
+    [adapter, connecting],
   );
 
   const logout = useCallback(async () => {
+    if (!adapter) return;
     try {
       await adapter.disconnect();
     } catch {
@@ -99,9 +130,9 @@ export function BrokerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return () => {
-      adapter.disconnect().catch(() => {});
+      adapterRef.current?.disconnect().catch(() => {});
     };
-  }, [adapter]);
+  }, []);
 
   return (
     <BrokerContext.Provider
@@ -113,10 +144,13 @@ export function BrokerProvider({ children }: { children: ReactNode }) {
         balance,
         error,
         userName,
+        criticalAuthError,
         login,
         logout,
         updateServerUrl,
         clearError,
+        clearCriticalAuthError,
+        triggerCriticalAuthError,
       }}
     >
       {children}

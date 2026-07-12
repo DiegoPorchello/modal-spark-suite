@@ -74,7 +74,9 @@ export function DiagnosticPanel({ diagnostic }: DiagnosticPanelProps) {
                   </span>
                 )}
               </div>
-              <p className={`text-[11px] ${style?.text ?? "text-gray-400"} truncate`}>{step.message}</p>
+              <p className={`text-[11px] ${style?.text ?? "text-gray-400"} truncate`}>
+                {step.message}
+              </p>
             </div>
           </div>
         );

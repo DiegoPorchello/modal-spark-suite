@@ -124,12 +124,14 @@ export function connectLoggerToDaemon(daemonUrl = "http://127.0.0.1:3001"): () =
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(batch),
       keepalive: true,
-    }).catch(() => {}).finally(() => {
-      flushing = false;
-      if (flushBatch.length > 0) {
-        scheduleFlush();
-      }
-    });
+    })
+      .catch(() => {})
+      .finally(() => {
+        flushing = false;
+        if (flushBatch.length > 0) {
+          scheduleFlush();
+        }
+      });
   };
 
   const scheduleFlush = () => {

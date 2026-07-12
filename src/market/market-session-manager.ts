@@ -200,8 +200,8 @@ export class MarketSessionManager {
     // Aberto: 00:00–18:00 (até 18:00 = 1080 min)
     // Fechado: 18:00–22:00 (1080–1320 min)
     // Aberto: 22:00–23:59 (1320–1439 min)
-    const closedStart = 18 * 60;      // 18:00 = 1080
-    const closedEnd = 22 * 60;        // 22:00 = 1320
+    const closedStart = 18 * 60; // 18:00 = 1080
+    const closedEnd = 22 * 60; // 22:00 = 1320
 
     if (timeMinutes >= closedStart && timeMinutes < closedEnd) {
       return "closed";
@@ -229,7 +229,7 @@ export class MarketSessionManager {
         next.setHours(22, 0, 0, 0);
       } else {
         // Aberto → Próxima transição: segunda às 18:00 (mercado fecha)
-        next.setDate(next.getDate() + (1 - 0 + 7) % 7); // próxima segunda
+        next.setDate(next.getDate() + ((1 - 0 + 7) % 7)); // próxima segunda
         next.setHours(18, 0, 0, 0);
       }
       return next;
@@ -244,8 +244,8 @@ export class MarketSessionManager {
     }
 
     // Segunda a Sexta (1–5)
-    const closedStart = 18 * 60;      // 18:00
-    const closedEnd = 22 * 60;        // 22:00
+    const closedStart = 18 * 60; // 18:00
+    const closedEnd = 22 * 60; // 22:00
 
     if (timeMinutes < closedStart) {
       // Aberto (manhã/tarde) → Próxima transição: hoje às 18:00 (mercado fecha)

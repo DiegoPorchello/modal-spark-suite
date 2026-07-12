@@ -96,12 +96,16 @@ export class ExecutionEngine {
   /** Define a próxima trade a ser executada na abertura do candle */
   setNextTrade(trade: NextTrade): void {
     this._nextTrade = trade;
-    engineLogger.info("ExecutionEngine", `NextTrade definido: ${trade.symbol} ${trade.direction} score=${trade.score}`, {
-      symbol: trade.symbol,
-      direction: trade.direction,
-      score: trade.score,
-      decidedAt: new Date(trade.decidedAt).toISOString(),
-    });
+    engineLogger.info(
+      "ExecutionEngine",
+      `NextTrade definido: ${trade.symbol} ${trade.direction} score=${trade.score}`,
+      {
+        symbol: trade.symbol,
+        direction: trade.direction,
+        score: trade.score,
+        decidedAt: new Date(trade.decidedAt).toISOString(),
+      },
+    );
   }
 
   /** Limpa a próxima trade (após execução ou cancelamento) */
@@ -141,7 +145,7 @@ export class ExecutionEngine {
   private _tick(): void {
     const now = this.clock.now;
     const currentCandle = Math.floor(now / 60000) * 60000;
-    const msToNext = Math.max(0, (currentCandle + 60000) - now);
+    const msToNext = Math.max(0, currentCandle + 60000 - now);
 
     // ── DETECÇÃO DE ABERTURA DE CANDLE ──
     if (currentCandle > this._lastCandleTime) {
@@ -152,7 +156,12 @@ export class ExecutionEngine {
     }
 
     // ── JANELA DE DECISÃO (200ms antes do fechamento) ──
-    if (msToNext <= DECISION_ADVANCE_MS && msToNext > 0 && !this._decisionTriggered && !this._nextTrade) {
+    if (
+      msToNext <= DECISION_ADVANCE_MS &&
+      msToNext > 0 &&
+      !this._decisionTriggered &&
+      !this._nextTrade
+    ) {
       this._decisionTriggered = true;
       this._phase = "decision";
       this._callbacks?.onPhaseChange?.(this._phase);
@@ -181,7 +190,11 @@ export class ExecutionEngine {
 
     const trade = this._nextTrade;
     if (!trade?.valid) {
-      engineLogger.info("ExecutionEngine", `Candle aberto ${new Date(candleTime).toISOString()} — sem nextTrade`, {});
+      engineLogger.info(
+        "ExecutionEngine",
+        `Candle aberto ${new Date(candleTime).toISOString()} — sem nextTrade`,
+        {},
+      );
       this._phase = "monitoring";
       this._callbacks?.onPhaseChange?.(this._phase);
       return;
@@ -189,7 +202,9 @@ export class ExecutionEngine {
 
     const decisionTime = trade.decidedAt;
     const sendTime = Date.now();
-    latencyTracker.mark("candle_open", "Candle Open", { candleTime: new Date(candleTime).toISOString() });
+    latencyTracker.mark("candle_open", "Candle Open", {
+      candleTime: new Date(candleTime).toISOString(),
+    });
 
     engineLogger.info("ExecutionEngine", `═══ EXECUTANDO ORDEM NA ABERTURA ═══`, {
       symbol: trade.symbol,
@@ -212,10 +227,14 @@ export class ExecutionEngine {
         timeframe: trade.timeframe,
       };
 
-      latencyTracker.mark("order_sent_proxy", "Order Sent to Proxy", { symbol: trade.symbol, direction: trade.direction });
-      const orderResult = trade.direction === "call"
-        ? await this._broker.buyCall(orderParams)
-        : await this._broker.buyPut(orderParams);
+      latencyTracker.mark("order_sent_proxy", "Order Sent to Proxy", {
+        symbol: trade.symbol,
+        direction: trade.direction,
+      });
+      const orderResult =
+        trade.direction === "call"
+          ? await this._broker.buyCall(orderParams)
+          : await this._broker.buyPut(orderParams);
       latencyTracker.mark("proxy_responded", "Proxy Responded", { orderId: orderResult.orderId });
 
       const confirmationTime = Date.now();
@@ -254,7 +273,7 @@ export class ExecutionEngine {
       // Detectar atraso
       if (totalLatency > MAX_LATENCY_WARN_MS) {
         this._callbacks?.onDelayDetected?.(
-          `ENTRY DELAY DETECTED: ${totalLatency}ms (symbol=${trade.symbol}, decisionDelay=${decisionDelay}ms, executionDelay=${executionDelay}ms)`
+          `ENTRY DELAY DETECTED: ${totalLatency}ms (symbol=${trade.symbol}, decisionDelay=${decisionDelay}ms, executionDelay=${executionDelay}ms)`,
         );
       }
 

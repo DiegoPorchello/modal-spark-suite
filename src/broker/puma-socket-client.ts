@@ -192,16 +192,20 @@ export class PumaSocketClient {
 
     const tokenInfo = getTokenInfo(this._jwt);
 
-    engineLogger.info("PumaSocketClient", `═══ CONECTANDO AO PUMA (socket.io-client) #${this.instanceId} ═══`, {
-      url: PUMA_URL,
-      userId: this._userId,
-      assetsCount: this._assets.length,
-      assets: this._assets.join(", "),
-      interval: this._interval,
-      jwtSub: tokenInfo?.sub ?? "unknown",
-      jwtExp: tokenInfo?.exp ?? "unknown",
-      jwtExpiresIn: tokenInfo?.expiresIn ?? "unknown",
-    });
+    engineLogger.info(
+      "PumaSocketClient",
+      `═══ CONECTANDO AO PUMA (socket.io-client) #${this.instanceId} ═══`,
+      {
+        url: PUMA_URL,
+        userId: this._userId,
+        assetsCount: this._assets.length,
+        assets: this._assets.join(", "),
+        interval: this._interval,
+        jwtSub: tokenInfo?.sub ?? "unknown",
+        jwtExp: tokenInfo?.exp ?? "unknown",
+        jwtExpiresIn: tokenInfo?.expiresIn ?? "unknown",
+      },
+    );
 
     if (tokenInfo?.expiresIn === "EXPIRADO") {
       engineLogger.error("PumaSocketClient", "⚠️ TOKEN JWT EXPIRADO — conexão pode falhar", {
@@ -249,10 +253,17 @@ export class PumaSocketClient {
 
     this._tradesSocket.on("connect", () => {
       this._tradesConnected = true;
-      console.log("[PumaSocket] ✅ /trades CONECTADO — socketId:", this._tradesSocket?.id);
+      console.log(
+        "[PumaSocket] ✅ /trades CONECTADO — socketId:",
+        this._tradesSocket?.id,
+        "transport:",
+        this._tradesSocket?.io?.engine?.transport?.name,
+      );
       engineLogger.info("PumaSocketClient", "✅ Namespace /trades CONECTADO", {
         userId: this._userId,
         socketId: this._tradesSocket?.id,
+        transport: this._tradesSocket?.io?.engine?.transport?.name,
+        sid: this._tradesSocket?.io?.engine?.id,
       });
 
       // Subscribe com USER_ID (exatamente como o cliente oficial)
@@ -270,6 +281,23 @@ export class PumaSocketClient {
       }
     });
 
+    this._tradesSocket.on("disconnect", (reason, description) => {
+      this._tradesConnected = false;
+      console.log(
+        "[PumaSocket] ❌ /trades DESCONECTADO — reason:",
+        reason,
+        "description:",
+        description,
+      );
+      engineLogger.warn("PumaSocketClient", "❌ Namespace /trades DESCONECTADO", {
+        reason,
+        description: description instanceof Error ? description.message : String(description ?? ""),
+        socketId: this._tradesSocket?.id,
+        connected: this._tradesSocket?.connected,
+      });
+      this._checkDisconnected();
+    });
+
     this._tradesSocket.onAny((...args: unknown[]) => {
       console.log("[PumaSocket] /trades onAny:", args[0], JSON.stringify(args[1])?.slice(0, 200));
     });
@@ -279,16 +307,11 @@ export class PumaSocketClient {
     });
 
     this._tradesSocket.on("connect_error", (err: Error) => {
-      engineLogger.error("PumaSocketClient", "Erro ao conectar /trades", {
+      engineLogger.error("PumaSocketClient", "❌ Erro ao conectar /trades", {
         message: err.message,
+        stack: err.stack,
       });
       this._onError?.(`Trades connect error: ${err.message}`);
-    });
-
-    this._tradesSocket.on("disconnect", (reason: string) => {
-      this._tradesConnected = false;
-      engineLogger.warn("PumaSocketClient", "Namespace /trades desconectado", { reason });
-      this._checkDisconnected();
     });
   }
 
@@ -462,6 +485,9 @@ export class PumaSocketClient {
 
     const tradeId = String(data.id ?? "");
     const status = String(data.status ?? "ACTIVE");
+
+    console.log("[DEBUG-TRADE] 📊 tradeUpdate RAW payload:", JSON.stringify(data, null, 2));
+    console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol });
 
     engineLogger.info("PumaSocketClient", "📊 tradeUpdate recebido", {
       tradeId,

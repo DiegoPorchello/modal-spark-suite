@@ -5,6 +5,3 @@ timeout /t 2 /nobreak >nul
 echo [Puma] Iniciando Daemon...
 start "Puma Daemon" cmd /k "npm run daemon"
 timeout /t 3 /nobreak >nul
-echo [Puma] Iniciando WS Proxy...
-start "Puma WS Proxy" cmd /k "npm run wsproxy"
-timeout /t 3 /nobreak >nul

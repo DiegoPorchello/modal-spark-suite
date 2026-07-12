@@ -203,14 +203,19 @@ export class PumaMarketDataService {
 
       try {
         const interval = this._options.interval ?? 60;
-        const binanceInterval = interval >= 3600 ? `${Math.floor(interval / 3600)}h` : `${Math.floor(interval / 60)}m`;
+        const binanceInterval =
+          interval >= 3600 ? `${Math.floor(interval / 3600)}h` : `${Math.floor(interval / 60)}m`;
         const binanceSymbol = (SYMBOL_MAP[upperAsset] ?? upperAsset).toUpperCase();
 
         const url = `${BINANCE_PROXY_URL}?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=200`;
         const response = await fetch(url);
 
         if (!response.ok) {
-          engineLogger.warn("PumaMarketDataService", `Binance API erro ${response.status}: ${upperAsset}`, {});
+          engineLogger.warn(
+            "PumaMarketDataService",
+            `Binance API erro ${response.status}: ${upperAsset}`,
+            {},
+          );
           continue;
         }
 
@@ -337,6 +342,11 @@ export class PumaMarketDataService {
   }
 
   private _handleTradeUpdate(data: TradeUpdateData): void {
+    console.log("[DEBUG-TRADE] 📊 MarketDataService forwarding tradeUpdate:", {
+      id: data.id,
+      status: data.status,
+      symbol: data.symbol,
+    });
     this._options.onTradeUpdate?.(data);
   }
 

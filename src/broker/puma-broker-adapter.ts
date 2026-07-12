@@ -180,6 +180,11 @@ export class PumaBrokerAdapter implements IBroker {
   // PumaWs2Client — WebSocket puro para candles históricos de híbridos
   private _ws2Client: PumaWs2Client | null = null;
 
+  // Critical auth error callback (set externally by React component)
+  private _onCriticalAuthError:
+    | ((error: { message: string; source: string; originalError: string }) => void)
+    | null = null;
+
   // Cache REST de candles (chave: "asset:resolution", TTL: 15s)
   private _restCandleCache = new Map<string, { candles: Candle[]; expiresAt: number }>();
 
@@ -210,16 +215,19 @@ export class PumaBrokerAdapter implements IBroker {
 
   constructor() {
     this.instanceId = PumaBrokerAdapter._nextId++;
-    this._binanceWs = new BinanceWsClient(
-      (symbol: string, candle: Candle, isHistory?: boolean) => {
-        if (this._marketDataService) {
-          this._marketDataService.addCandleFromExternal(symbol, candle, isHistory);
-        }
-      },
-      this._onCandleCloseCallbacks,
-    );
+    this._binanceWs = new BinanceWsClient((symbol: string, candle: Candle, isHistory?: boolean) => {
+      if (this._marketDataService) {
+        this._marketDataService.addCandleFromExternal(symbol, candle, isHistory);
+      }
+    }, this._onCandleCloseCallbacks);
     this._sessionManager = new MarketSessionManager();
     console.log(`[PumaBrokerAdapter] 🆕 NOVA INSTÂNCIA #${this.instanceId}`);
+  }
+
+  setCriticalAuthErrorHandler(
+    handler: ((error: { message: string; source: string; originalError: string }) => void) | null,
+  ): void {
+    this._onCriticalAuthError = handler;
   }
 
   getSessionManager(): MarketSessionManager {
@@ -288,6 +296,15 @@ export class PumaBrokerAdapter implements IBroker {
     password: string,
     accountType: "real" | "demo",
   ): Promise<void> {
+    // Guard: evita conexões concorrentes ou duplicadas
+    if (this._connected) {
+      engineLogger.info("PumaBroker", "connectWithCredentials: já conectado — ignorando");
+      return;
+    }
+    if (this._connecting) {
+      engineLogger.warn("PumaBroker", "connectWithCredentials: conexão em andamento — ignorando");
+      return;
+    }
     this._connecting = true;
     this._error = null;
 
@@ -303,6 +320,9 @@ export class PumaBrokerAdapter implements IBroker {
 
       // Log detalhado do usuário autenticado
       const tokenInfo = getTokenInfo(this._token);
+      const ws2Preview = this._ws2Session
+        ? `${this._ws2Session.slice(0, 20)}... (len=${this._ws2Session.length})`
+        : "N/D";
       engineLogger.info("PumaBroker", "═══════════════════════════════════════════════════", {});
       engineLogger.info("PumaBroker", "═══ LOGIN REALIZADO COM SUCESSO ═══", {});
       engineLogger.info("PumaBroker", `  Usuário autenticado: ${this._userName}`, {});
@@ -317,6 +337,7 @@ export class PumaBrokerAdapter implements IBroker {
         {},
       );
       engineLogger.info("PumaBroker", `  Conta: ${this._isDemo ? "DEMO" : "REAL"}`, {});
+      engineLogger.info("PumaBroker", `  WS2 session cookie: ${ws2Preview}`, {});
       engineLogger.info("PumaBroker", "═══════════════════════════════════════════════════", {});
 
       // 2. Buscar saldo real
@@ -391,7 +412,9 @@ export class PumaBrokerAdapter implements IBroker {
 
     // ⚠️ DESCONECTAR instância anterior se existir (evita múltiplas instâncias)
     if (this._marketDataService) {
-      console.warn(`[PumaBrokerAdapter #${this.instanceId}] ⚠️ MarketDataService #${this._marketDataService.instanceId} já existe — desconectando antes de criar nova`);
+      console.warn(
+        `[PumaBrokerAdapter #${this.instanceId}] ⚠️ MarketDataService #${this._marketDataService.instanceId} já existe — desconectando antes de criar nova`,
+      );
       this._marketDataService.disconnect();
       this._marketDataService = null;
     }
@@ -472,10 +495,19 @@ export class PumaBrokerAdapter implements IBroker {
    * Usado para pares híbridos (BETHUSDT, BTSOLUSDT, etc.) que não existem na Binance.
    */
   private _initWs2Client(): void {
-    // WS2 precisa do server_name_session cookie, NÃO do JWT
-    const ws2Token = this._ws2Session || this._token;
+    // WS2 precisa OBRIGATORIAMENTE do server_name_session cookie, NÃO do JWT
+    // O daemon extrai isso do header Set-Cookie do login
+    const ws2Token = this._ws2Session;
+    const tokenPreview = ws2Token ? `${ws2Token.slice(0, 15)}... (len=${ws2Token.length})` : "NULL";
+    engineLogger.info("PumaBroker", `═══ _initWs2Client: _ws2Session=${tokenPreview} ═══`, {});
     if (!ws2Token) {
-      engineLogger.error("PumaBroker", "WS2: token de sessão ausente", {});
+      engineLogger.error(
+        "PumaBroker",
+        "WS2: server_name_session cookie AUSENTE — WS2 não conectará. Verifique se o login retornou ws2Session.",
+        {},
+      );
+      this._error =
+        "WS2: cookie server_name_session não disponível (login pode ter falhado em capturar cookie)";
       return;
     }
 
@@ -490,6 +522,7 @@ export class PumaBrokerAdapter implements IBroker {
 
     // Desconecta instância anterior se existir
     if (this._ws2Client) {
+      engineLogger.info("PumaBroker", "_initWs2Client: desconectando ws2Client anterior", {});
       this._ws2Client.disconnect();
       this._ws2Client = null;
     }
@@ -507,30 +540,57 @@ export class PumaBrokerAdapter implements IBroker {
         }
       },
       onBufferReady: (symbol, count) => {
-        engineLogger.info("PumaBroker", `═══ WS2 BUFFER PRONTO: ${symbol} (${count} candles) ═══`, {});
+        engineLogger.info(
+          "PumaBroker",
+          `═══ WS2 BUFFER PRONTO: ${symbol} (${count} candles) ═══`,
+          {},
+        );
       },
       onAuthError: (message) => {
         this._error = message;
         engineLogger.error("PumaBroker", `═══ ERRO DE AUTENTICAÇÃO WS2 (visível na UI) ═══`, {
           error: message,
         });
+        // Trigger critical auth error handler if set (will stop robot and show modal)
+        this._onCriticalAuthError?.({
+          message: "Robô parado — falha de autenticação com a Puma Broker",
+          source: "puma-ws2-client.ts:onAuthError",
+          originalError: message,
+        });
       },
       onRefreshToken: async () => {
+        engineLogger.info("PumaBroker", "═══ REFRESH WS2 TOKEN: chamando daemon /ws2-session?force=1 ═══", {
+          currentTokenPreview: this._ws2Session
+            ? `${this._ws2Session.slice(0, 15)}... (len=${this._ws2Session.length})`
+            : "NULL",
+        });
         const res = await fetch(`${DAEMON_URL}/ws2-session?force=1`, {
           headers: { Authorization: `Bearer ${this._token}` },
         });
         if (!res.ok) {
           const body = await res.text().catch(() => "");
-          if (res.status === 503) {
-            throw new Error(`DAEMON_CIRCUIT_BREAKER: daemon bloqueou refresh (HTTP 503) — ${body}`);
+          if (res.status === 503 || res.status === 429) {
+            throw new Error(
+              `DAEMON_CIRCUIT_BREAKER: daemon bloqueou refresh (HTTP ${res.status}) — ${body}`,
+            );
           }
           throw new Error(`DAEMON_REFRESH_FAILED: HTTP ${res.status} — ${body}`);
         }
         const data = await res.json();
         const newToken = data.session ?? null;
+        const newTokenPreview = newToken
+          ? `${newToken.slice(0, 15)}... (len=${newToken.length})`
+          : "NULL";
+        engineLogger.info("PumaBroker", `═══ REFRESH WS2 TOKEN: daemon retornou session=${newTokenPreview} ═══`, {});
         if (newToken && newToken !== this._ws2Session) {
+          engineLogger.info(
+            "PumaBroker",
+            "WS2 token renovado via daemon (force refresh): %s → %s",
+            { de: this._ws2Session ? `${this._ws2Session.slice(0, 15)}...` : "NULL", para: newTokenPreview },
+          );
           this._ws2Session = newToken;
-          engineLogger.info("PumaBroker", "WS2 token renovado via daemon (force refresh)", {});
+        } else if (newToken && newToken === this._ws2Session) {
+          engineLogger.warn("PumaBroker", "WS2 token refresh: daemon retornou o MESMO token — pode estar obsoleto", {});
         }
         if (!newToken) {
           throw new Error("DAEMON_REFRESH_FAILED: daemon retornou session vazio");
@@ -541,15 +601,12 @@ export class PumaBrokerAdapter implements IBroker {
 
     this._ws2Client.connect();
 
-    engineLogger.info(
-      "PumaBroker",
-      `═══ WS2 CONECTANDO PARA HÍBRIDOS ═══`,
-      {
-        assets: activeHybrids.join(", "),
-        mode: this._ws2Client["_options"]?.useProxy ? "proxy" : "direto",
-        hasWs2Session: !!this._ws2Session,
-      },
-    );
+    engineLogger.info("PumaBroker", `═══ WS2 CONECTANDO PARA HÍBRIDOS ═══`, {
+      assets: activeHybrids.join(", "),
+      mode: this._ws2Client["_options"]?.useProxy ? "proxy" : "direto",
+      hasWs2Session: !!this._ws2Session,
+      sessionPreview: tokenPreview,
+    });
   }
 
   /**
@@ -562,12 +619,16 @@ export class PumaBrokerAdapter implements IBroker {
     const hybridAssets = ["BETHUSDT", "BTSOLUSDT", "MAPEUSDT", "XRDOGUSDT", "XRPSOLUSDT"];
     const activeHybrids = hybridAssets.filter((a) => this._subscribedSymbols.has(a));
     if (activeHybrids.length === 0 || !this._token) {
-      engineLogger.info("PumaBroker", "_fetchHybridHistory: SKIP — nenhum híbrido ativo ou sem token", {
-        activeHybrids,
-        hasToken: !!this._token,
-        subscribedCount: this._subscribedSymbols.size,
-        subscribedAssets: Array.from(this._subscribedSymbols),
-      });
+      engineLogger.info(
+        "PumaBroker",
+        "_fetchHybridHistory: SKIP — nenhum híbrido ativo ou sem token",
+        {
+          activeHybrids,
+          hasToken: !!this._token,
+          subscribedCount: this._subscribedSymbols.size,
+          subscribedAssets: Array.from(this._subscribedSymbols),
+        },
+      );
       return;
     }
 
@@ -645,7 +706,11 @@ export class PumaBrokerAdapter implements IBroker {
             fed++;
           }
         }
-        engineLogger.info("PumaBroker", `_fetchHybridHistory: ${symbol} — ${fed} candles alimentados no buffer`, {});
+        engineLogger.info(
+          "PumaBroker",
+          `_fetchHybridHistory: ${symbol} — ${fed} candles alimentados no buffer`,
+          {},
+        );
       } catch (err) {
         engineLogger.error("PumaBroker", `Falha ao buscar histórico REST: ${symbol}`, {
           error: String(err),
@@ -670,7 +735,10 @@ export class PumaBrokerAdapter implements IBroker {
     }
 
     if (!this._token) {
-      engineLogger.warn("PumaBroker", "_fetchHistoryREST: SKIP — sem token", { symbol, resolution });
+      engineLogger.warn("PumaBroker", "_fetchHistoryREST: SKIP — sem token", {
+        symbol,
+        resolution,
+      });
       return [];
     }
     const to = Math.floor(Date.now() / 1000);
@@ -1025,13 +1093,26 @@ export class PumaBrokerAdapter implements IBroker {
   }
 
   waitForTradeResult(orderId: string, timeoutMs = 30000): Promise<OrderStatus> {
+    console.log(
+      `[DEBUG-TRADE] ⏱ waitForTradeResult START: orderId=${orderId}, timeoutMs=${timeoutMs}, now=${Date.now()}`,
+    );
     return new Promise<OrderStatus>((resolve) => {
       const timer = setTimeout(async () => {
+        console.log(`[DEBUG-TRADE] ⏱ TIMEOUT FIRED: orderId=${orderId}, now=${Date.now()}`);
+        const pending = this._pendingTradeResults.get(orderId);
+        if (!pending) {
+          console.log(
+            `[DEBUG-TRADE] ⏱ TIMEOUT: order ${orderId} already resolved/removed, skipping REST fallback`,
+          );
+          return;
+        }
         this._pendingTradeResults.delete(orderId);
         try {
           const status = await this.getResult(orderId);
+          console.log(`[DEBUG-TRADE] ⏱ REST FALLBACK RESULT: orderId=${orderId}, status=${status}`);
           resolve(status);
         } catch (err) {
+          console.log(`[DEBUG-TRADE] ⏱ REST FALLBACK FAILED: orderId=${orderId}, error=${err}`);
           engineLogger.error("PumaBroker", "Timeout + REST falhou — assumindo ACTIVE", {
             orderId,
             error: String(err),
@@ -1041,15 +1122,30 @@ export class PumaBrokerAdapter implements IBroker {
       }, timeoutMs);
 
       this._pendingTradeResults.set(orderId, { resolve, timer });
+      console.log(
+        `[DEBUG-TRADE] ⏱ PENDING REGISTERED: orderId=${orderId}, pendingCount=${this._pendingTradeResults.size}`,
+      );
     });
   }
 
   handleTradeUpdate(data: { id: string; status: string }): void {
+    console.log(
+      `[DEBUG-TRADE] 📊 handleTradeUpdate RECEIVED: id=${data.id}, status=${data.status}, now=${Date.now()}`,
+    );
     const pending = this._pendingTradeResults.get(data.id);
     if (pending) {
+      console.log(
+        `[DEBUG-TRADE] 📊 handleTradeUpdate: PENDING FOUND, resolving with normalized status`,
+      );
       clearTimeout(pending.timer);
       this._pendingTradeResults.delete(data.id);
-      pending.resolve(this._normalizeStatus(data.status));
+      const normalized = this._normalizeStatus(data.status);
+      console.log(`[DEBUG-TRADE] 📊 handleTradeUpdate: normalized ${data.status} -> ${normalized}`);
+      pending.resolve(normalized);
+    } else {
+      console.log(
+        `[DEBUG-TRADE] 📊 handleTradeUpdate: NO PENDING for ${data.id} (already resolved or not tracked)`,
+      );
     }
   }
 

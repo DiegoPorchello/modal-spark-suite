@@ -229,14 +229,16 @@ export class FlowRobotEngine {
   private _state: RobotState;
   private _loopTimer: ReturnType<typeof setTimeout> | null = null;
   private _countdownTimer: ReturnType<typeof setInterval> | null = null;
-  private _isProcessing = false;
   private decisionEngine: DecisionEngine;
   private _candleCloseUnsub: (() => void) | null = null;
-  private _pendingCandleClose = false;
   private _sessionUnsub: (() => void) | null = null;
   private _customLevels: number[] = [];
   private _customPayout: number = 0.86;
   private assetCooldowns: Map<string, number> = new Map();
+  // Idempotency guard: last processed candle timestamp per asset (STATIC = shared across all instances)
+  private static _lastProcessedCandle: Map<string, number> = new Map();
+  private static _isProcessing = false;
+  private static _pendingCandleClose = false;
 
   constructor(broker: PumaBrokerAdapter) {
     this.instanceId = FlowRobotEngine._nextId++;
@@ -255,14 +257,12 @@ export class FlowRobotEngine {
     // Inicializa com a sessão atual do broker
     // Tenta restaurar config persistida (localStorage) — sobrescreve defaults se existir
     const savedConfig = loadPersistedConfig();
-    const initialConfig = savedConfig ? { ...DEFAULT_ROBOT_CONFIG, ...savedConfig } : DEFAULT_ROBOT_CONFIG;
+    const initialConfig = savedConfig
+      ? { ...DEFAULT_ROBOT_CONFIG, ...savedConfig }
+      : DEFAULT_ROBOT_CONFIG;
     const sessionInfo = this.broker.getSessionInfo();
     const currentSession = sessionInfo?.currentSession;
-    this._state = this._buildInitialState(
-      initialConfig,
-      currentSession,
-      sessionInfo,
-    );
+    this._state = this._buildInitialState(initialConfig, currentSession, sessionInfo);
 
     // Escuta mudanças de sessão
     const sessionManager = this.broker.getSessionManager();
@@ -649,7 +649,7 @@ export class FlowRobotEngine {
     this._state.scanLog = [];
     this._state.lastScannedAsset = null;
     this._state.lastAnalysis = null;
-    this._pendingCandleClose = false;
+    FlowRobotEngine._pendingCandleClose = false;
     this.assetCooldowns.clear();
 
     engineLogger.info("FlowRobot", "Buffer de análise limpo", {
@@ -695,7 +695,10 @@ export class FlowRobotEngine {
   }
 
   private _onCandleClose(candle: Candle): void {
-    latencyTracker.mark("candle_closed", "Candle Closed", { asset: candle.asset, time: candle.time });
+    latencyTracker.mark("candle_closed", "Candle Closed", {
+      asset: candle.asset,
+      time: candle.time,
+    });
 
     // Filtra por ativos relevantes
     const isMulti = this._state.config.scanMode === "multi";
@@ -706,6 +709,14 @@ export class FlowRobotEngine {
       return;
     }
 
+    // IDEMPOTÊNCIA: ignora candle já processado (mesmo timestamp + asset)
+    const lastTime = FlowRobotEngine._lastProcessedCandle.get(candle.asset);
+    if (lastTime !== undefined && lastTime >= candle.time) {
+      engineLogger.debug("FlowRobot", `⏭️ Candle duplicado ignorado (idempotência): ${candle.asset} @ ${new Date(candle.time).toLocaleTimeString("pt-BR")} (lastProcessed=${lastTime})`);
+      return;
+    }
+    FlowRobotEngine._lastProcessedCandle.set(candle.asset, candle.time);
+
     const bufferStatus = this.broker.getBufferStatus();
     engineLogger.info(
       "FlowRobot",
@@ -714,7 +725,7 @@ export class FlowRobotEngine {
         close: candle.close,
         bufferNow: bufferStatus.map((b) => `${b.key}=${b.count}`).join(", "),
         status: this._state.status,
-        isProcessing: this._isProcessing,
+        isProcessing: FlowRobotEngine._isProcessing,
       },
     );
     this._emitAnalyst("candle.closed", {
@@ -724,15 +735,22 @@ export class FlowRobotEngine {
     });
 
     // Se o robô está rodando e não está processando, agenda análise imediata
-    if (this._state.status === "running" && !this._isProcessing) {
-      this._pendingCandleClose = false;
+    if (this._state.status === "running" && !FlowRobotEngine._isProcessing) {
+      FlowRobotEngine._pendingCandleClose = false;
       this._clearTimers();
       this._runOperationCycle().catch((err) =>
-        engineLogger.error("FlowRobot", "Erro no ciclo disparado por candle close", { error: String(err) }),
+        engineLogger.error("FlowRobot", "Erro no ciclo disparado por candle close", {
+          error: String(err),
+        }),
       );
-    } else if (this._state.status === "running" && this._isProcessing) {
+    } else if (this._state.status === "running" && FlowRobotEngine._isProcessing) {
+      engineLogger.warn(
+        "FlowRobot",
+        `⚠️ _onCandleClose ignorado (já processando): ${candle.asset} @ ${new Date(candle.time).toLocaleTimeString("pt-BR")} — marcando pendente`,
+        {},
+      );
       // Marca que há candle pendente para processar no próximo ciclo
-      this._pendingCandleClose = true;
+      FlowRobotEngine._pendingCandleClose = true;
     }
   }
 
@@ -746,7 +764,7 @@ export class FlowRobotEngine {
   private async _onDecisionTime(): Promise<void> {
     try {
       if (this._state.status !== "running") return;
-      if (this._isProcessing) return;
+      if (FlowRobotEngine._isProcessing) return;
 
       // Se há uma operação ativa (aguardando resultado), não toma nova decisão
       if (this._state.activeOperation) {
@@ -800,7 +818,8 @@ export class FlowRobotEngine {
 
       const asset = this._state.config.asset;
       const selectedTimeframe = this._state.selectedTimeframe ?? this._state.config.timeframes[0];
-      const expiration = TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
+      const expiration =
+        TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
       const entryPrice = (() => {
         const analysis = this._state.lastAnalysis;
         const candles = analysis?.candles;
@@ -825,7 +844,11 @@ export class FlowRobotEngine {
         valid: true,
         decidedAt: Date.now(),
       };
-      latencyTracker.mark("order_created", "Order Created (decision window)", { asset, direction: marketDir, score });
+      latencyTracker.mark("order_created", "Order Created (decision window)", {
+        asset,
+        direction: marketDir,
+        score,
+      });
       latencyTracker.beginTrade(`trade-${Date.now()}`);
 
       this.executionEngine.setNextTrade(nextTrade);
@@ -900,7 +923,10 @@ export class FlowRobotEngine {
     this._state.status = "waiting-result";
     this._emit("operation-opened", operation);
 
-    const tradeExpiration = this._state.nextTrade?.expiration ?? TIMEFRAME_EXPIRATION_MAP[record.timeframe] ?? this._state.config.expirationSeconds;
+    const tradeExpiration =
+      this._state.nextTrade?.expiration ??
+      TIMEFRAME_EXPIRATION_MAP[record.timeframe] ??
+      this._state.config.expirationSeconds;
 
     this._state.nextTrade = null;
     this.executionEngine.clearNextTrade();
@@ -911,7 +937,13 @@ export class FlowRobotEngine {
         record.tradeId,
         (tradeExpiration + 15) * 1000,
       );
-      latencyTracker.mark("trade_result", "Trade Result", { tradeId: record.tradeId, status: finalStatus });
+      console.log(
+        `[DEBUG-TRADE] 🤖 flow-robot-engine: finalStatus=${finalStatus} for tradeId=${record.tradeId}`,
+      );
+      latencyTracker.mark("trade_result", "Trade Result", {
+        tradeId: record.tradeId,
+        status: finalStatus,
+      });
 
       const isWin = finalStatus === "WIN";
       const isLoss = finalStatus === "LOSS";
@@ -933,17 +965,25 @@ export class FlowRobotEngine {
         const levelAntes = this.smartRecovery.getState().currentLevel;
         this.smartRecovery.registerLoss(operation.direction);
         const levelDepois = this.smartRecovery.getState().currentLevel;
-        engineLogger.info("FlowRobot", `📉 LOSS registrado: nível ${levelAntes} → ${levelDepois}, stake=${operation.amount}`, {
-          levelAntes,
-          levelDepois,
-          amount: operation.amount,
-          entryAntes: operation.entryNumber,
-          entryDepois: this.smartRecovery.getState().entryNumber,
-        });
+        engineLogger.info(
+          "FlowRobot",
+          `📉 LOSS registrado: nível ${levelAntes} → ${levelDepois}, stake=${operation.amount}`,
+          {
+            levelAntes,
+            levelDepois,
+            amount: operation.amount,
+            entryAntes: operation.entryNumber,
+            entryDepois: this.smartRecovery.getState().entryNumber,
+          },
+        );
         this._state.totalLosses++;
         const cooldownMs = (this._state.config.assetCooldownMinutes ?? 5) * 60 * 1000;
         this.assetCooldowns.set(operation.asset, Date.now() + cooldownMs);
-        engineLogger.info("FlowRobot", `Cooldown ativado para ${operation.asset} — ${this._state.config.assetCooldownMinutes ?? 5}min após loss`, {});
+        engineLogger.info(
+          "FlowRobot",
+          `Cooldown ativado para ${operation.asset} — ${this._state.config.assetCooldownMinutes ?? 5}min após loss`,
+          {},
+        );
         this._state.currentBankroll -= operation.amount;
         this._state.sessionProfit -= operation.amount;
         this._state.currentEntry = this.smartRecovery.getCurrentStake();
@@ -951,7 +991,11 @@ export class FlowRobotEngine {
         this._state.currentRecoveryStep = this.smartRecovery.getState().currentLevel;
         this._emitAnalyst("trade.loss", { loss: operation.amount });
       } else {
+        console.log(
+          `[DEBUG-TRADE] 🤖 flow-robot-engine: DRAW branch taken! finalStatus was="${finalStatus}", isWin=${isWin}, isLoss=${isLoss}`,
+        );
         operation.result = "draw";
+        operation.profit = 0;
         this.smartRecovery.registerDraw(operation.direction);
         this._state.totalDraws++;
         this._state.currentEntry = this.smartRecovery.getCurrentStake();
@@ -973,7 +1017,8 @@ export class FlowRobotEngine {
       this._state.status = "running";
 
       if (this._state.totalWins + this._state.totalLosses > 0) {
-        this._state.winRate = (this._state.totalWins / (this._state.totalWins + this._state.totalLosses)) * 100;
+        this._state.winRate =
+          (this._state.totalWins / (this._state.totalWins + this._state.totalLosses)) * 100;
       }
 
       persistOperations(this._state.operations);
@@ -1026,10 +1071,12 @@ export class FlowRobotEngine {
     if (this._state.status !== "running") return;
 
     // Se há candle fechado pendente, processa imediatamente
-    if (this._pendingCandleClose) {
-      this._pendingCandleClose = false;
+    if (FlowRobotEngine._pendingCandleClose) {
+      FlowRobotEngine._pendingCandleClose = false;
       this._runOperationCycle().catch((err) =>
-        engineLogger.error("FlowRobot", "Erro no ciclo por candle pendente", { error: String(err) }),
+        engineLogger.error("FlowRobot", "Erro no ciclo por candle pendente", {
+          error: String(err),
+        }),
       );
       return;
     }
@@ -1050,14 +1097,21 @@ export class FlowRobotEngine {
   }
 
   private async _runOperationCycle(): Promise<void> {
-    if (this._state.status !== "running" || this._isProcessing) return;
-    this._isProcessing = true;
+    if (this._state.status !== "running" || FlowRobotEngine._isProcessing) {
+      if (FlowRobotEngine._isProcessing) {
+        engineLogger.warn("FlowRobot", "⏭️ _runOperationCycle ignorado — já processando (guarda estática)", {
+          isProcessing: FlowRobotEngine._isProcessing,
+        });
+      }
+      return;
+    }
+    FlowRobotEngine._isProcessing = true;
 
     // ══ DIAGNÓSTICO DO CICLO ══
     const bufferStatus = this.broker.getBufferStatus();
     engineLogger.info("FlowRobot", `═══ CICLO DE OPERAÇÃO ═══`, {
       status: this._state.status,
-      isProcessing: this._isProcessing,
+      isProcessing: FlowRobotEngine._isProcessing,
       bufferKeys: bufferStatus.length,
       bufferSummary: bufferStatus.map((b) => `${b.key}=${b.count}`).join(", "),
       wsConnected: this.broker.connected,
@@ -1073,7 +1127,7 @@ export class FlowRobotEngine {
         details: bufferStatus.map((b) => `${b.key}=${b.count}`).join(", "),
         reason: "WebSocket pode não estar enviando dados ou buffer ainda carregando",
       });
-      this._isProcessing = false;
+      FlowRobotEngine._isProcessing = false;
       this._scheduleNextOperation(5);
       return;
     }
@@ -1084,7 +1138,7 @@ export class FlowRobotEngine {
         session: this._state.currentSession,
         reason: "Operações permitidas apenas em sessão aberta",
       });
-      this._isProcessing = false;
+      FlowRobotEngine._isProcessing = false;
       this._scheduleNextOperation(60);
       return;
     }
@@ -1160,12 +1214,16 @@ export class FlowRobotEngine {
       });
 
       const entrada = this.smartRecovery.getEntry();
-      engineLogger.info("FlowRobot", `📊 CICLO: nível=${entrada.level} entry=${entrada.entry} valor=R$${entrada.valor.toFixed(2)} isSoros=${entrada.isSoros}`, {
-        level: entrada.level,
-        entry: entrada.entry,
-        valor: entrada.valor,
-        isSoros: entrada.isSoros,
-      });
+      engineLogger.info(
+        "FlowRobot",
+        `📊 CICLO: nível=${entrada.level} entry=${entrada.entry} valor=R$${entrada.valor.toFixed(2)} isSoros=${entrada.isSoros}`,
+        {
+          level: entrada.level,
+          entry: entrada.entry,
+          valor: entrada.valor,
+          isSoros: entrada.isSoros,
+        },
+      );
 
       // ── VALIDAÇÃO: entrada inválida ou stop loss excedido ──
       if (entrada.valor <= 0) {
@@ -1279,7 +1337,8 @@ export class FlowRobotEngine {
 
       const asset = this._state.config.asset;
       const selectedTimeframe = this._state.selectedTimeframe ?? this._state.config.timeframes[0];
-      const expiration = TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
+      const expiration =
+        TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
       const payout = await this.broker.getPayout(asset).catch((err) => {
         engineLogger.warn("FlowRobot", "Falha ao buscar payout, usando default 0.85", {
           asset,
@@ -1357,7 +1416,7 @@ export class FlowRobotEngine {
       // Schedule próximo ciclo de análise
       this._scheduleNextOperation(this._getIntervalSeconds());
     } finally {
-      this._isProcessing = false;
+      FlowRobotEngine._isProcessing = false;
     }
   }
 
@@ -1391,12 +1450,22 @@ export class FlowRobotEngine {
     decision: DecisionResult;
     timeframe: string;
   } | null> {
-    latencyTracker.mark("scan_started", "Scan Started", { assets: this._state.config.assets.length });
+    latencyTracker.mark("scan_started", "Scan Started", {
+      assets: this._state.config.assets.length,
+    });
     const assets = this._state.config.assets;
     const timeframes = this._state.config.timeframes;
 
-    engineLogger.info("FlowRobot", `Scan multi-ativo: ${assets.length} ativos x ${timeframes.length} timeframes`, { assets, timeframes });
-    this._emitDiagnostic("receiving", "loading", `Escaneando ${assets.length} ativos em ${timeframes.length} timeframes...`);
+    engineLogger.info(
+      "FlowRobot",
+      `Scan multi-ativo: ${assets.length} ativos x ${timeframes.length} timeframes`,
+      { assets, timeframes },
+    );
+    this._emitDiagnostic(
+      "receiving",
+      "loading",
+      `Escaneando ${assets.length} ativos em ${timeframes.length} timeframes...`,
+    );
 
     const scanLog: ScanLogEntry[] = [];
     let bestCandidate: {
@@ -1430,7 +1499,9 @@ export class FlowRobotEngine {
       // Check payout once per asset
       const payout = await this.broker.getPayout(asset).catch(() => null);
       if (!payout || payout < 0.7) {
-        engineLogger.warn("FlowRobot", `SCAN ${asset}: BLOQUEADO — payout`, { payout: payout ?? "null" });
+        engineLogger.warn("FlowRobot", `SCAN ${asset}: BLOQUEADO — payout`, {
+          payout: payout ?? "null",
+        });
         for (const tf of timeframes) {
           const entry: ScanLogEntry = {
             asset,
@@ -1459,43 +1530,134 @@ export class FlowRobotEngine {
             });
 
             if (!candles || candles.length < minCandles) {
-              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: BLOQUEADO — poucos dados`, { count: candles?.length ?? 0 });
-              return { tf, entry: { asset, score: 0, blocked: true as const, reason: `Poucos dados ${tf} (${candles?.length ?? 0}/${minCandles})`, timestamp: Date.now(), timeframe: tf } as ScanLogEntry, candidate: null as { asset: string; direction: "call" | "put"; decision: DecisionResult; timeframe: string } | null };
+              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: BLOQUEADO — poucos dados`, {
+                count: candles?.length ?? 0,
+              });
+              return {
+                tf,
+                entry: {
+                  asset,
+                  score: 0,
+                  blocked: true as const,
+                  reason: `Poucos dados ${tf} (${candles?.length ?? 0}/${minCandles})`,
+                  timestamp: Date.now(),
+                  timeframe: tf,
+                } as ScanLogEntry,
+                candidate: null as {
+                  asset: string;
+                  direction: "call" | "put";
+                  decision: DecisionResult;
+                  timeframe: string;
+                } | null,
+              };
             }
 
             const decision = this.decisionEngine.analyze(candles, asset);
-            latencyTracker.mark("score_calculated", "Score Calculated", { asset, tf, score: decision.scoreBreakdown.total });
+            latencyTracker.mark("score_calculated", "Score Calculated", {
+              asset,
+              tf,
+              score: decision.scoreBreakdown.total,
+            });
 
             if (decision.blockedReason) {
-              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: BLOQUEADO`, { score: decision.scoreBreakdown.total, band: decision.scoreBreakdown.bandLabel, rule: decision.blockedRule, reason: decision.blockedReason });
-              return { tf, entry: { asset, score: decision.scoreBreakdown.total, blocked: true as const, reason: `${tf}: ${decision.blockedReason}`, timestamp: Date.now(), trend: decision.trend.direction ?? undefined, pattern: decision.priceAction.pattern ?? undefined, timeframe: tf } as ScanLogEntry, candidate: null };
+              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: BLOQUEADO`, {
+                score: decision.scoreBreakdown.total,
+                band: decision.scoreBreakdown.bandLabel,
+                rule: decision.blockedRule,
+                reason: decision.blockedReason,
+              });
+              return {
+                tf,
+                entry: {
+                  asset,
+                  score: decision.scoreBreakdown.total,
+                  blocked: true as const,
+                  reason: `${tf}: ${decision.blockedReason}`,
+                  timestamp: Date.now(),
+                  trend: decision.trend.direction ?? undefined,
+                  pattern: decision.priceAction.pattern ?? undefined,
+                  timeframe: tf,
+                } as ScanLogEntry,
+                candidate: null,
+              };
             }
 
             if (decision.direction) {
               const direction = decision.direction.toLowerCase() as "call" | "put";
               const score = decision.scoreBreakdown.total;
-              latencyTracker.mark("decision_taken", "Decision Taken", { asset, tf, direction, score });
-              engineLogger.trade("FlowRobot", `SCAN ${asset} ${tf}: ✅ ${direction.toUpperCase()} ENCONTRADO (Score: ${score})`, { score, trend: decision.trend.direction, pattern: decision.priceAction.pattern });
+              latencyTracker.mark("decision_taken", "Decision Taken", {
+                asset,
+                tf,
+                direction,
+                score,
+              });
+              engineLogger.trade(
+                "FlowRobot",
+                `SCAN ${asset} ${tf}: ✅ ${direction.toUpperCase()} ENCONTRADO (Score: ${score})`,
+                { score, trend: decision.trend.direction, pattern: decision.priceAction.pattern },
+              );
               return {
                 tf,
-                entry: { asset, score, blocked: false as const, reason: `✅ ${direction.toUpperCase()} ${tf} — Score: ${score}/100`, timestamp: Date.now(), trend: decision.trend.direction ?? undefined, pattern: decision.priceAction.pattern ?? undefined, direction, timeframe: tf } as ScanLogEntry,
+                entry: {
+                  asset,
+                  score,
+                  blocked: false as const,
+                  reason: `✅ ${direction.toUpperCase()} ${tf} — Score: ${score}/100`,
+                  timestamp: Date.now(),
+                  trend: decision.trend.direction ?? undefined,
+                  pattern: decision.priceAction.pattern ?? undefined,
+                  direction,
+                  timeframe: tf,
+                } as ScanLogEntry,
                 candidate: { asset, direction, decision, timeframe: tf },
               };
             }
 
-            return { tf, entry: { asset, score: decision.scoreBreakdown.total, blocked: true as const, reason: `${tf}: Sem direção (CALL: -, PUT: -)`, timestamp: Date.now(), trend: decision.trend.direction ?? undefined, pattern: decision.priceAction.pattern ?? undefined, timeframe: tf } as ScanLogEntry, candidate: null };
+            return {
+              tf,
+              entry: {
+                asset,
+                score: decision.scoreBreakdown.total,
+                blocked: true as const,
+                reason: `${tf}: Sem direção (CALL: -, PUT: -)`,
+                timestamp: Date.now(),
+                trend: decision.trend.direction ?? undefined,
+                pattern: decision.priceAction.pattern ?? undefined,
+                timeframe: tf,
+              } as ScanLogEntry,
+              candidate: null,
+            };
           } catch (err) {
             engineLogger.warn("FlowRobot", `Scan: ${asset} ${tf} erro`, { error: String(err) });
-            return { tf, entry: { asset, score: 0, blocked: true as const, reason: `${tf}: Erro: ${err}`, timestamp: Date.now(), timeframe: tf } as ScanLogEntry, candidate: null };
+            return {
+              tf,
+              entry: {
+                asset,
+                score: 0,
+                blocked: true as const,
+                reason: `${tf}: Erro: ${err}`,
+                timestamp: Date.now(),
+                timeframe: tf,
+              } as ScanLogEntry,
+              candidate: null,
+            };
           }
         }),
       );
 
       for (const r of tfResults) {
         scanLog.push(r.entry);
-        if (r.candidate && (!bestCandidate || r.candidate.decision.scoreBreakdown.total > bestCandidate.decision.scoreBreakdown.total)) {
+        if (
+          r.candidate &&
+          (!bestCandidate ||
+            r.candidate.decision.scoreBreakdown.total > bestCandidate.decision.scoreBreakdown.total)
+        ) {
           bestCandidate = r.candidate;
-          engineLogger.info("FlowRobot", `SCAN: ${asset} ${r.tf} é o novo melhor (score: ${r.candidate.decision.scoreBreakdown.total})`, {});
+          engineLogger.info(
+            "FlowRobot",
+            `SCAN: ${asset} ${r.tf} é o novo melhor (score: ${r.candidate.decision.scoreBreakdown.total})`,
+            {},
+          );
         }
       }
     }
@@ -1520,7 +1682,10 @@ export class FlowRobotEngine {
         const key = group ?? signal.asset;
         const bestInGroup = groupBest.get(key);
         if (bestInGroup && signal.asset !== bestInGroup.asset) {
-          engineLogger.info("FlowRobot", `Correlação: ${signal.asset} bloqueado (${group ?? "único"}) — ${bestInGroup.asset} tem score maior (${bestInGroup.score} > ${signal.score})`);
+          engineLogger.info(
+            "FlowRobot",
+            `Correlação: ${signal.asset} bloqueado (${group ?? "único"}) — ${bestInGroup.asset} tem score maior (${bestInGroup.score} > ${signal.score})`,
+          );
           signal.blocked = true;
           signal.reason = `Correlação: ${group ?? "grupo"} — ${bestInGroup.asset} tem score superior`;
         }
@@ -1676,7 +1841,11 @@ export class FlowRobotEngine {
             this._emitAnalyst("candle.new", { count: candles.length });
           }
           if (!candles || candles.length < minCandles) {
-            engineLogger.warn("FlowRobot", `${tf}: poucos dados (${candles?.length ?? 0}/${minCandles})`, { asset });
+            engineLogger.warn(
+              "FlowRobot",
+              `${tf}: poucos dados (${candles?.length ?? 0}/${minCandles})`,
+              { asset },
+            );
             continue;
           }
           const decision = this.decisionEngine.analyze(candles, asset);
@@ -2077,7 +2246,15 @@ export class FlowRobotEngine {
   }
 
   private _emitDiagnostic(
-    step: "receiving" | "analyzing" | "score" | "entry" | "order" | "confirmed" | "demo" | "session",
+    step:
+      | "receiving"
+      | "analyzing"
+      | "score"
+      | "entry"
+      | "order"
+      | "confirmed"
+      | "demo"
+      | "session",
     status: "loading" | "ok" | "error" | "blocked" | "authorized" | "warning",
     message: string,
   ): void {

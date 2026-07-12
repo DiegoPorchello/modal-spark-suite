@@ -120,9 +120,17 @@ export function AnalystPanel({
 
   useEffect(() => {
     const diary = store.diary;
-    if (voiceEnabled && voiceRef.current && diary.length > prevDiaryLenRef.current) {
+    if (!diary) {
+      return;
+    }
+    if (voiceEnabled && voiceRef.current && diary.length > (prevDiaryLenRef.current || 0)) {
       const newEntry = diary[0];
-      if (newEntry) {
+      if (
+        newEntry &&
+        typeof newEntry === "object" &&
+        "text" in newEntry &&
+        "timestamp" in newEntry
+      ) {
         voiceRef.current.speakDiary(newEntry);
       }
     }
@@ -355,7 +363,10 @@ function MarketPanel({
       </div>
       <div className="grid grid-cols-2 gap-2">
         <InfoBox label="Ativo" value={robotState?.config.asset || market.asset} />
-        <InfoBox label="Timeframes" value={robotState?.config.timeframes?.join(", ") || market.timeframe || "M1"} />
+        <InfoBox
+          label="Timeframes"
+          value={robotState?.config.timeframes?.join(", ") || market.timeframe || "M1"}
+        />
         <div className="p-2 rounded-lg bg-secondary/30">
           <div className="text-[9px] text-muted-foreground">Tendência</div>
           <div className="flex items-center gap-1 mt-0.5">
@@ -706,9 +717,7 @@ function ScanLogPanel({ scanLog }: { scanLog: ScanLogEntry[] }) {
       <div className="flex items-center gap-1.5 mb-2">
         <BarChart3 className="size-3 text-muted-foreground" />
         <span className="text-[9px] tracking-widest text-muted-foreground">CATÁLOGO AO VIVO</span>
-        <span className="text-[8px] ml-auto text-muted-foreground">
-          {scanLog.length} ativos
-        </span>
+        <span className="text-[8px] ml-auto text-muted-foreground">{scanLog.length} ativos</span>
       </div>
 
       {/* Summary badges */}
@@ -754,18 +763,21 @@ function ScanLogPanel({ scanLog }: { scanLog: ScanLogEntry[] }) {
               : "bg-success/5 border-success/10";
 
           return (
-            <div
-              key={`${entry.asset}-${i}`}
-              className={`p-1.5 rounded border ${statusBg}`}
-            >
+            <div key={`${entry.asset}-${i}`} className={`p-1.5 rounded border ${statusBg}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   {trendIcon}
-                  <span className="text-[9px] font-mono font-bold">{entry.asset.replace("USDT", "")}</span>
+                  <span className="text-[9px] font-mono font-bold">
+                    {entry.asset.replace("USDT", "")}
+                  </span>
                   {entry.direction && (
-                    <span className={`text-[7px] font-bold px-1 rounded ${
-                      entry.direction === "call" ? "bg-success/20 text-success" : "bg-danger/20 text-danger"
-                    }`}>
+                    <span
+                      className={`text-[7px] font-bold px-1 rounded ${
+                        entry.direction === "call"
+                          ? "bg-success/20 text-success"
+                          : "bg-danger/20 text-danger"
+                      }`}
+                    >
                       {entry.direction.toUpperCase()}
                     </span>
                   )}

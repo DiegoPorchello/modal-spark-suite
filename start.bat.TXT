@@ -12,22 +12,17 @@ echo  [1/3] Iniciando Daemon REST (porta 3001)...
 start "Puma Daemon" cmd /k "title Puma Daemon (3001) && npm run daemon"
 timeout /t 3 /nobreak >nul
 
-echo  [2/3] Iniciando WS Proxy (porta 3002)...
-start "Puma WS Proxy" cmd /k "title Puma WS Proxy (3002) && npm run wsproxy"
-timeout /t 3 /nobreak >nul
-
-echo  [3/3] Iniciando Frontend...
-start "Puma Frontend" cmd /k "title Puma Frontend && npm run dev"
+echo  [2/3] Iniciando Frontend...
+start "Puma Frontend" cmd /k "title Puma Frontend && npx vite dev"
 timeout /t 2 /nobreak >nul
 
 echo.
 echo  ✅ Tudo iniciado!
 echo.
 echo  Portas em uso:
-echo    3001 — proxy_daemon.py  (REST: history, trades)
-echo    3002 — ws_proxy.py      (WebSocket: wsm5 candles)
+echo    3001 — proxy_daemon.py  (REST: history, trades, WS2 proxy)
 echo    5173 — frontend         (npm run dev)
 echo.
-echo  Para encerrar: feche as 3 janelas abertas.
+echo  Para encerrar: feche as 2 janelas abertas.
 echo.
 pause

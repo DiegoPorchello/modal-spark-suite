@@ -11,10 +11,7 @@ function normalizeTime(time: number, minuteInterval: number): number {
   return Math.floor(time / msInterval) * msInterval;
 }
 
-export function aggregateCandles(
-  m1Candles: Candle[],
-  targetTimeframe: string,
-): Candle[] {
+export function aggregateCandles(m1Candles: Candle[], targetTimeframe: string): Candle[] {
   const intervalMinutes = TIMEFRAME_MINUTES[targetTimeframe];
   if (!intervalMinutes || intervalMinutes <= 1) {
     return m1Candles;
@@ -40,7 +37,7 @@ export function aggregateCandles(
     const open = candles[0].open;
     let high = -Infinity;
     let low = Infinity;
-    let close = candles[candles.length - 1].close;
+    const close = candles[candles.length - 1].close;
     let volume = 0;
     const asset = candles[0].asset;
     const verify = candles[candles.length - 1].verify;

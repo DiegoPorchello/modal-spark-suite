@@ -303,7 +303,10 @@ export class SmartRecoveryEngine {
       this.state.levelTable = this.calculator.generateLevelTable(this.config);
     }
 
-    const safeLevel = Math.max(0, Math.min(this.state.currentLevel, this.state.levelTable.length - 1));
+    const safeLevel = Math.max(
+      0,
+      Math.min(this.state.currentLevel, this.state.levelTable.length - 1),
+    );
     const row = this.calculator.getLevelRow(safeLevel, this.state.levelTable);
 
     if (!row) {

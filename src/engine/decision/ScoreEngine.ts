@@ -63,13 +63,19 @@ export class ScoreEngine {
   };
 
   // ── Histórico de performance dos filtros (feedback loop) ──
-  private static filterPerformance: Record<string, { wins: number; losses: number; total: number }> = {};
+  private static filterPerformance: Record<
+    string,
+    { wins: number; losses: number; total: number }
+  > = {};
   private static readonly MIN_TRADES_FOR_RECALIB = 20;
   private static readonly WEIGHT_ADJUST_STEP = 2;
   private static readonly WEIGHT_MIN = 5;
   private static readonly WEIGHT_MAX = 30;
 
-  static recordResult(filterPoints: { name: string; points: number; maxPoints: number }[], wasWin: boolean): void {
+  static recordResult(
+    filterPoints: { name: string; points: number; maxPoints: number }[],
+    wasWin: boolean,
+  ): void {
     for (const f of filterPoints) {
       const key = f.name;
       if (!ScoreEngine.filterPerformance[key]) {
@@ -87,18 +93,18 @@ export class ScoreEngine {
   }
 
   private static readonly FILTER_NAME_MAP: Record<string, string> = {
-    "Tendência": "tendencia",
+    Tendência: "tendencia",
     "LTA/LTB": "lta_ltb",
     "Suporte/Resistência": "suporte_resistencia",
     "Order Block": "orderBlock",
-    "Liquidez": "liquidez",
-    "Pullback": "pullback",
-    "Retração": "retracao",
+    Liquidez: "liquidez",
+    Pullback: "pullback",
+    Retração: "retracao",
     "Força da vela": "forcaVela",
-    "Continuidade": "continuidade",
+    Continuidade: "continuidade",
     "Nova Alta/Baixa": "novaAltaBaixa",
     "Smart Money": "smartMoney",
-    "Volume": "volume",
+    Volume: "volume",
     "Padrão de Candle": "padraoCandle",
   };
 
@@ -124,8 +130,12 @@ export class ScoreEngine {
     return { changes };
   }
 
-  static getFilterPerformance(): Record<string, { wins: number; losses: number; total: number; winRate: number }> {
-    const result: Record<string, { wins: number; losses: number; total: number; winRate: number }> = {};
+  static getFilterPerformance(): Record<
+    string,
+    { wins: number; losses: number; total: number; winRate: number }
+  > {
+    const result: Record<string, { wins: number; losses: number; total: number; winRate: number }> =
+      {};
     for (const [key, perf] of Object.entries(ScoreEngine.filterPerformance)) {
       result[key] = { ...perf, winRate: perf.total > 0 ? perf.wins / perf.total : 0 };
     }

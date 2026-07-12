@@ -4,7 +4,8 @@
  *
  * Duas formas de conectar:
  *   1. DIRETA (padrão): conecta em wss://wsmt5.pumabroker.com/ com o
- *      cookie server_name_session (headers em Node.js/Bun, document.cookie no browser).
+ *      JWT accessToken enviado como cookie server_name_session
+ *      (headers em Node.js/Bun, document.cookie no browser).
  *   2. PROXY (useProxy:true): conecta via proxy local ws://127.0.0.1:3002.
  *      Necessário quando o runtime não suporta headers customizados em WebSocket.
  *
@@ -58,7 +59,7 @@ export interface PumaWs2ClientOptions {
   useProxy?: boolean;
   onCandle?: (symbol: string, candle: Candle) => void;
   onBufferReady?: (symbol: string, count: number) => void;
-  /** Chamado quando o token/cookie expirou. Deve retornar um novo server_name_session. */
+  /** Chamado quando o JWT accessToken expirou. Deve retornar um novo accessToken. */
   onRefreshToken?: () => Promise<string>;
   /** TTL em ms do cookie server_name_session (default: 55min). Usado para refresh preventivo. */
   tokenTtlMs?: number;
@@ -76,9 +77,11 @@ export class PumaWs2Client {
   private _reconnectCount = 0;
   private _refreshCount = 0;
   private readonly _MAX_RECONNECT_BEFORE_REFRESH = 3;
+  private readonly _REFRESH_COOLDOWN_MS = 10_000; // Cooldown mínimo entre refreshes sequenciais (ms)
   private _isRefreshing = false;
   private _consecutiveAuthErrors = 0;
   private _lastAuthErrorTime = 0;
+  private _lastRefreshTime = 0; // Timestamp do último refresh (sucesso ou falha)
   private _candleCount = new Map<string, number>();
   private _readySymbols = new Set<string>();
 
@@ -119,10 +122,18 @@ export class PumaWs2Client {
     if (!this._debug) return;
     const tag = "WS2_DEBUG";
     switch (level) {
-      case "INFO":   engineLogger.info(tag, msg, {}); break;
-      case "DEBUG":  engineLogger.debug(tag, msg, {}); break;
-      case "WARN":   engineLogger.warn(tag, msg, {}); break;
-      case "ERROR":  engineLogger.error(tag, msg, {}); break;
+      case "INFO":
+        engineLogger.info(tag, msg, {});
+        break;
+      case "DEBUG":
+        engineLogger.debug(tag, msg, {});
+        break;
+      case "WARN":
+        engineLogger.warn(tag, msg, {});
+        break;
+      case "ERROR":
+        engineLogger.error(tag, msg, {});
+        break;
     }
   }
 
@@ -156,7 +167,11 @@ export class PumaWs2Client {
       this._ws.onmessage = null;
       this._ws.onerror = null;
       this._ws.onclose = null;
-      try { this._ws.close(); } catch { /* ignore */ }
+      try {
+        this._ws.close();
+      } catch {
+        /* ignore */
+      }
       this._ws = null;
     }
     this._connected = false;
@@ -198,10 +213,15 @@ export class PumaWs2Client {
         this._ws.onmessage = null;
         this._ws.onerror = null;
         this._ws.onclose = null;
-        if (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING) {
+        if (
+          this._ws.readyState === WebSocket.OPEN ||
+          this._ws.readyState === WebSocket.CONNECTING
+        ) {
           this._ws.close();
         }
-      } catch { /* ignora */ }
+      } catch {
+        /* ignora */
+      }
       this._ws = null;
     }
     this._connected = false;
@@ -209,6 +229,13 @@ export class PumaWs2Client {
     try {
       const token = this._options.sessionToken;
       const useProxy = this._options.useProxy ?? false;
+
+      // Log do valor exato do token sendo enviado
+      const tokenPreview = token ? `${token.slice(0, 20)}... (len=${token.length})` : "NULL";
+      engineLogger.info("PumaWs2Client", `═══ _doConnect: token=${tokenPreview} | useProxy=${useProxy} ═══`, {
+        tokenLength: token?.length ?? 0,
+        assets: this._options.assets.join(", "),
+      });
 
       if (useProxy) {
         const url = `${WS2_PROXY_URL}?token=${encodeURIComponent(token)}`;
@@ -227,16 +254,25 @@ export class PumaWs2Client {
         // Tenta setar cookie no browser para o domínio do WS2
         try {
           document.cookie = `server_name_session=${token}; path=/; domain=.pumabroker.com; secure; samesite=lax`;
-        } catch { /* ignora se não for browser */ }
+        } catch {
+          /* ignora se não for browser */
+        }
 
         // Tenta com headers (Node.js 21+, Bun, Deno)
         try {
-          this._ws = new (WebSocket as any)(WS2_DIRECT_URL, [], {
+          const WebSocketWithHeaders = WebSocket as unknown as {
+            new (
+              url: string,
+              protocols: string | string[],
+              options: { headers: Record<string, string> },
+            ): WebSocket;
+          };
+          this._ws = new WebSocketWithHeaders(WS2_DIRECT_URL, [], {
             headers: {
               Cookie: `server_name_session=${token}`,
               Origin: "https://trade.pumabroker.com",
             },
-          }) as WebSocket;
+          });
           this._dlog("INFO", "WebSocket criado com headers (Node.js/Bun)");
         } catch {
           // Fallback: browser (confia que o cookie foi setado)
@@ -282,7 +318,10 @@ export class PumaWs2Client {
 
         if (isAuthError) {
           if (this._isRefreshing) {
-            this._dlog("WARN", "═══ FALHA DE AUTENTICAÇÃO — refresh já em andamento, ignorando onclose ═══");
+            this._dlog(
+              "WARN",
+              "═══ FALHA DE AUTENTICAÇÃO — refresh já em andamento, ignorando onclose ═══",
+            );
             return;
           }
           this._dlog("WARN", "═══ FALHA DE AUTENTICAÇÃO — renovando token ═══");
@@ -383,14 +422,15 @@ export class PumaWs2Client {
       this._dlog("INFO", `Tipo: ${msgType}`);
 
       if (msgType === "bar_update") {
-        this._dlog("INFO", `bar_update: symbol=${data.symbol} interval=${data.interval} time=${data.bar?.time} close=${data.bar?.close}`);
+        this._dlog(
+          "INFO",
+          `bar_update: symbol=${data.symbol} interval=${data.interval} time=${data.bar?.time} close=${data.bar?.close}`,
+        );
         this._timelineAdd(`BAR_UPDATE ${data.symbol} close=${data.bar?.close}`);
         this._handleBarUpdate(data as Ws2BarUpdate);
-
       } else if (msgType === "server_time") {
         this._dlog("DEBUG", `server_time response: timestamp=${data.timestamp}`);
         this._timelineAdd("HEARTBEAT OK");
-
       } else if (msgType === "error" || msgType === "error_message") {
         const errMsg = data.message ?? data.msg ?? JSON.stringify(data);
         this._dlog("WARN", `═══ ★ ERRO DO SERVIDOR: ${errMsg} ★ ═══`);
@@ -402,15 +442,24 @@ export class PumaWs2Client {
         });
 
         // "Not authenticated" → token expirou/inválido → renova e reconecta
-        if (errMsg.toLowerCase().includes("not authenticated") || errMsg.toLowerCase().includes("auth")) {
+        if (
+          errMsg.toLowerCase().includes("not authenticated") ||
+          errMsg.toLowerCase().includes("auth")
+        ) {
           const now = Date.now();
           if (now - this._lastAuthErrorTime < AUTH_ERROR_DEBOUNCE_MS) {
-            this._dlog("WARN", `═══ ★ TOKEN REJEITADO — ignorado (debounce ${AUTH_ERROR_DEBOUNCE_MS}ms) ★ ═══`);
+            this._dlog(
+              "WARN",
+              `═══ ★ TOKEN REJEITADO — ignorado (debounce ${AUTH_ERROR_DEBOUNCE_MS}ms) ★ ═══`,
+            );
             return;
           }
           this._lastAuthErrorTime = now;
           this._consecutiveAuthErrors++;
-          this._dlog("WARN", `═══ ★ TOKEN REJEITADO — renovando... (erro consecutivo #${this._consecutiveAuthErrors}) ★ ═══`);
+          this._dlog(
+            "WARN",
+            `═══ ★ TOKEN REJEITADO — renovando... (erro consecutivo #${this._consecutiveAuthErrors}) ★ ═══`,
+          );
           this._timelineAdd("AUTH ERROR VIA MSG — REFRESH");
           this._clearTimers();
           this._refreshTokenAndReconnect().catch((err) => {
@@ -419,10 +468,8 @@ export class PumaWs2Client {
             });
           });
         }
-
       } else if (this._isHistoryResponse(msgType, data)) {
         this._handleHistoryResponse(data);
-
       } else {
         // QUALQUER OUTRO TIPO — logar COMPLETO
         const fullStr = JSON.stringify(data).slice(0, 1000);
@@ -468,7 +515,10 @@ export class PumaWs2Client {
       return;
     }
     const upperSymbol = symbol.toUpperCase();
-    const bars = (data.bars ?? data.candles ?? data.data ?? data.bar ?? []) as Record<string, unknown>[];
+    const bars = (data.bars ?? data.candles ?? data.data ?? data.bar ?? []) as Record<
+      string,
+      unknown
+    >[];
 
     if (!Array.isArray(bars) || bars.length === 0) {
       this._dlog("WARN", `Histórico vazio para ${upperSymbol}`);
@@ -557,7 +607,10 @@ export class PumaWs2Client {
     const count = (this._candleCount.get(upperSymbol) ?? 0) + 1;
     this._candleCount.set(upperSymbol, count);
 
-    this._dlog("INFO", `📊 Candle #${this._totalCandleCount} (${upperSymbol} #${symCount}): close=${candle.close.toFixed(5)} time=${new Date(candle.time).toISOString()}`);
+    this._dlog(
+      "INFO",
+      `📊 Candle #${this._totalCandleCount} (${upperSymbol} #${symCount}): close=${candle.close.toFixed(5)} time=${new Date(candle.time).toISOString()}`,
+    );
 
     // Cancela timeout no primeiro candle
     if (this._totalCandleCount === 1) {
@@ -632,7 +685,10 @@ export class PumaWs2Client {
     );
     this._reconnectCount++;
 
-    this._dlog("INFO", `Reconectando em ${(delay / 1000).toFixed(0)}s... (attempt ${this._reconnectCount})`);
+    this._dlog(
+      "INFO",
+      `Reconectando em ${(delay / 1000).toFixed(0)}s... (attempt ${this._reconnectCount})`,
+    );
     this._timelineAdd(`RECONNECT in ${(delay / 1000).toFixed(0)}s`);
 
     this._reconnectTimer = setTimeout(() => {
@@ -649,16 +705,35 @@ export class PumaWs2Client {
       return;
     }
 
+    // Cooldown: evita refreshes sequenciais muito próximos (throttling client-side)
+    const now = Date.now();
+    const timeSinceLastRefresh = now - this._lastRefreshTime;
+    if (timeSinceLastRefresh < this._REFRESH_COOLDOWN_MS) {
+      const waitMs = this._REFRESH_COOLDOWN_MS - timeSinceLastRefresh;
+      this._dlog(
+        "WARN",
+        `═══ REFRESH BLOQUEADO (cooldown ${waitMs}ms) — último refresh há ${timeSinceLastRefresh}ms ═══`,
+      );
+      this._timelineAdd(`REFRESH BLOCKED cooldown=${waitMs}ms`);
+      // Agenda nova tentativa após o cooldown
+      setTimeout(() => {
+        if (this._running) this._refreshTokenAndReconnect();
+      }, waitMs);
+      return;
+    }
+
     // Marca como "em refresh" IMEDIATAMENTE para travar chamadas concorrentes
     // durante toda a duração (circuit breaker + refresh HTTP + delay)
     this._isRefreshing = true;
+    this._lastRefreshTime = now; // Marca timestamp ANTES de iniciar para evitar race
     this._dlog("INFO", `═══ RENOVANDO TOKEN WS2 (tentativa ${this._refreshCount + 1}) ═══`);
     this._timelineAdd("REFRESH TOKEN");
 
     // Circuit breaker: muitas falhas consecutivas de auth → pausa e avisa
     if (this._consecutiveAuthErrors >= MAX_CONSECUTIVE_AUTH_ERRORS) {
       const pauseMs = Math.min(
-        RECONNECT_BASE_DELAY * Math.pow(2, this._consecutiveAuthErrors - MAX_CONSECUTIVE_AUTH_ERRORS),
+        RECONNECT_BASE_DELAY *
+          Math.pow(2, this._consecutiveAuthErrors - MAX_CONSECUTIVE_AUTH_ERRORS),
         RECONNECT_MAX_DELAY,
       );
       engineLogger.error(
@@ -670,15 +745,16 @@ export class PumaWs2Client {
           maxAllowed: MAX_CONSECUTIVE_AUTH_ERRORS,
         },
       );
-      this._dlog("ERROR", `═══ ★ CIRCUIT BREAKER ABERTO: ${this._consecutiveAuthErrors} erros — pausa ${(pauseMs / 1000).toFixed(0)}s ★ ═══`);
+      this._dlog(
+        "ERROR",
+        `═══ ★ CIRCUIT BREAKER ABERTO: ${this._consecutiveAuthErrors} erros — pausa ${(pauseMs / 1000).toFixed(0)}s ★ ═══`,
+      );
       this._timelineAdd(`CIRCUIT BREAKER OPEN ${(pauseMs / 1000).toFixed(0)}s`);
       this._consecutiveAuthErrors = 0;
       await new Promise((r) => setTimeout(r, pauseMs));
-      engineLogger.info(
-        "PumaWs2Client",
-        `═══ CIRCUIT BREAKER FECHADO — retomando reconexão ═══`,
-        { pausedForSeconds: (pauseMs / 1000).toFixed(1) },
-      );
+      engineLogger.info("PumaWs2Client", `═══ CIRCUIT BREAKER FECHADO — retomando reconexão ═══`, {
+        pausedForSeconds: (pauseMs / 1000).toFixed(1),
+      });
       this._dlog("INFO", "═══ CIRCUIT BREAKER FECHADO — retomando reconexão ═══");
       this._timelineAdd("CIRCUIT BREAKER CLOSED");
     }
@@ -718,7 +794,9 @@ export class PumaWs2Client {
           { error: errMsg },
         );
         this._dlog("ERROR", `═══ ★ ${userMsg} ★ ═══`);
-        this._timelineAdd(isBreaker ? "DAEMON CIRCUIT BREAKER — STOP" : "DAEMON REFRESH FAILED — STOP");
+        this._timelineAdd(
+          isBreaker ? "DAEMON CIRCUIT BREAKER — STOP" : "DAEMON REFRESH FAILED — STOP",
+        );
 
         this._options.onAuthError?.(userMsg);
         this._isRefreshing = false;
@@ -728,7 +806,10 @@ export class PumaWs2Client {
 
     // Delay MÍNIMO antes de reconectar após erro de auth (evita loop insano)
     // Mantém _isRefreshing=true durante o delay para bloquear novos ciclos
-    this._dlog("INFO", `Aguardando ${(AUTH_RECONNECT_DELAY / 1000).toFixed(0)}s antes de reconectar...`);
+    this._dlog(
+      "INFO",
+      `Aguardando ${(AUTH_RECONNECT_DELAY / 1000).toFixed(0)}s antes de reconectar...`,
+    );
     this._timelineAdd(`AUTH RECONNECT DELAY ${(AUTH_RECONNECT_DELAY / 1000).toFixed(0)}s`);
     await new Promise((r) => setTimeout(r, AUTH_RECONNECT_DELAY));
 

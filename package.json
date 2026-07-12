@@ -13,7 +13,7 @@
     "daemon": "python pumabroker-api/proxy_daemon.py",
     "wsproxy": "python pumabroker-api/ws_proxy.py --port 3002",
     "services": "start.bat",
-    "start:all": "npm run services && timeout /t 3 /nobreak && npm run dev"
+    "start:all": "npm run services && timeout /t 3 /nobreak && npx vite dev"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

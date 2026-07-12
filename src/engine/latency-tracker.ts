@@ -7,25 +7,25 @@
  */
 
 type Phase =
-  | "candle_closed"       // 1. Evento de candle fechado recebido
-  | "scan_started"        // 2. Scan iniciado
-  | "indicators_done"     // 2b. Indicadores calculados (TrendEngine, Momentum, etc)
-  | "score_calculated"    // 3. ScoreEngine devolveu resultado
-  | "decision_taken"      // 4. Direção definida (CALL/PUT)
-  | "order_created"       // 5. nextTrade criado
-  | "order_queued"        // 5b. nextTrade armazenado no ExecutionEngine
-  | "decision_window"     // 5c. Janela de decisão (~200ms antes do close)
-  | "candle_open"         // 5d. Candle abriu (início da execução)
-  | "order_sent_proxy"    // 6. HTTP POST enviado ao proxy_daemon
-  | "proxy_responded"     // 7. Proxy respondeu HTTP 200/201
-  | "proxy_sent_puma"     // 8. Proxy encaminhou para API Puma
-  | "puma_confirmed"      // 9. Puma respondeu (order ID)
-  | "trade_opened"        // 10. Trade aberto/confirmado
-  | "trade_result";       // 10b. Resultado recebido (win/loss)
+  | "candle_closed" // 1. Evento de candle fechado recebido
+  | "scan_started" // 2. Scan iniciado
+  | "indicators_done" // 2b. Indicadores calculados (TrendEngine, Momentum, etc)
+  | "score_calculated" // 3. ScoreEngine devolveu resultado
+  | "decision_taken" // 4. Direção definida (CALL/PUT)
+  | "order_created" // 5. nextTrade criado
+  | "order_queued" // 5b. nextTrade armazenado no ExecutionEngine
+  | "decision_window" // 5c. Janela de decisão (~200ms antes do close)
+  | "candle_open" // 5d. Candle abriu (início da execução)
+  | "order_sent_proxy" // 6. HTTP POST enviado ao proxy_daemon
+  | "proxy_responded" // 7. Proxy respondeu HTTP 200/201
+  | "proxy_sent_puma" // 8. Proxy encaminhou para API Puma
+  | "puma_confirmed" // 9. Puma respondeu (order ID)
+  | "trade_opened" // 10. Trade aberto/confirmado
+  | "trade_result"; // 10b. Resultado recebido (win/loss)
 
 interface Mark {
   phase: Phase;
-  time: number;          // performance.now()
+  time: number; // performance.now()
   label: string;
   metadata?: Record<string, unknown>;
 }
@@ -33,8 +33,8 @@ interface Mark {
 interface PhaseSummary {
   phase: Phase;
   label: string;
-  elapsed: number | null;   // ms desde o marco anterior
-  total: number | null;     // ms desde candle_closed
+  elapsed: number | null; // ms desde o marco anterior
+  total: number | null; // ms desde candle_closed
   warning: "OK" | "WARN" | "ERROR" | "CRITICAL";
 }
 
@@ -159,7 +159,9 @@ class LatencyTrackerInstance {
       const warn = classify(elapsed);
       lines.push(`  Queue ................ ${elapsed.toString().padStart(4)}ms  [${warn}]`);
       if (elapsed > 100) {
-        lines.push(`  ⚠ Order queued for ${elapsed}ms — this is the wait between decision & candle open`);
+        lines.push(
+          `  ⚠ Order queued for ${elapsed}ms — this is the wait between decision & candle open`,
+        );
       }
     }
 
@@ -235,7 +237,8 @@ class LatencyTrackerInstance {
     if (warnings.length > 0) {
       lines.push("  ⚠ LATENCY WARNINGS:");
       for (const w of warnings) {
-        const level = w.warning === "CRITICAL" ? "🔴 CRITICAL" : w.warning === "ERROR" ? "🟠 ERROR" : "🟡 WARN";
+        const level =
+          w.warning === "CRITICAL" ? "🔴 CRITICAL" : w.warning === "ERROR" ? "🟠 ERROR" : "🟡 WARN";
         lines.push(`    ${level}: ${w.label} = ${w.elapsed}ms`);
       }
       lines.push("");

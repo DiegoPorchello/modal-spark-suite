@@ -220,7 +220,10 @@ export function CopyTradeView() {
             <div>
               <label className="text-xs text-muted-foreground block mb-1">Tipo de conta</label>
               <div className="flex gap-2 mt-1">
-                {[{ key: true, label: "Demo" }, { key: false, label: "Real" }].map((opt) => (
+                {[
+                  { key: true, label: "Demo" },
+                  { key: false, label: "Real" },
+                ].map((opt) => (
                   <button
                     key={String(opt.key)}
                     onClick={() => setFormIsDemo(opt.key)}
@@ -244,7 +247,10 @@ export function CopyTradeView() {
           )}
           <div className="flex justify-end gap-3">
             <button
-              onClick={() => { setShowAdd(false); setAddError(null); }}
+              onClick={() => {
+                setShowAdd(false);
+                setAddError(null);
+              }}
               className="px-4 py-2 text-sm text-muted-foreground hover:text-foreground"
             >
               Cancelar
@@ -263,12 +269,10 @@ export function CopyTradeView() {
 
       {/* ── Accounts List ── */}
       <div className="space-y-3">
-        {(!status?.accounts || status.accounts.length === 0) ? (
+        {!status?.accounts || status.accounts.length === 0 ? (
           <div className="bg-card rounded-xl border border-border p-8 text-center">
             <Copy className="size-10 mx-auto mb-3 text-muted-foreground/40" />
-            <p className="text-sm text-muted-foreground">
-              Nenhuma conta copy cadastrada.
-            </p>
+            <p className="text-sm text-muted-foreground">Nenhuma conta copy cadastrada.</p>
             <p className="text-xs text-muted-foreground/60 mt-1">
               Clique em "Adicionar Conta" para começar.
             </p>
@@ -290,7 +294,13 @@ export function CopyTradeView() {
   );
 }
 
-function AccountCard({ acc, onToggle, onRemove, onEdit, onRefresh }: {
+function AccountCard({
+  acc,
+  onToggle,
+  onRemove,
+  onEdit,
+  onRefresh,
+}: {
   acc: CopyAccount;
   onToggle: (id: string) => void;
   onRemove: (id: string) => void;
@@ -325,21 +335,19 @@ function AccountCard({ acc, onToggle, onRemove, onEdit, onRefresh }: {
   };
 
   const total = acc.total_wins + acc.total_losses;
-  const winRate = total > 0 ? (acc.total_wins / total * 100) : 0;
+  const winRate = total > 0 ? (acc.total_wins / total) * 100 : 0;
   const profit = (acc.current_balance ?? 0) - (acc.initial_balance ?? 0);
-  const startedDate = acc.started_at
-    ? new Date(acc.started_at).toLocaleDateString("pt-BR")
-    : "-";
+  const startedDate = acc.started_at ? new Date(acc.started_at).toLocaleDateString("pt-BR") : "-";
 
   return (
     <div className="bg-card rounded-xl border border-border p-4 space-y-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className={`size-3 rounded-full shrink-0 ${
-            acc.active
-              ? acc.last_error ? "bg-warning" : "bg-success"
-              : "bg-muted-foreground/30"
-          }`} />
+          <div
+            className={`size-3 rounded-full shrink-0 ${
+              acc.active ? (acc.last_error ? "bg-warning" : "bg-success") : "bg-muted-foreground/30"
+            }`}
+          />
           {editing ? (
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
@@ -354,17 +362,31 @@ function AccountCard({ acc, onToggle, onRemove, onEdit, onRefresh }: {
                     if (e.key === "Escape") setEditing(false);
                   }}
                 />
-                <button onClick={handleSaveLabel} disabled={saving} className="p-1 text-success hover:bg-success/10 rounded">
-                  {saving ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+                <button
+                  onClick={handleSaveLabel}
+                  disabled={saving}
+                  className="p-1 text-success hover:bg-success/10 rounded"
+                >
+                  {saving ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Check className="size-4" />
+                  )}
                 </button>
-                <button onClick={() => setEditing(false)} className="p-1 text-muted-foreground hover:bg-accent/40 rounded">
+                <button
+                  onClick={() => setEditing(false)}
+                  className="p-1 text-muted-foreground hover:bg-accent/40 rounded"
+                >
                   <X className="size-4" />
                 </button>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-muted-foreground">Tipo:</span>
                 <div className="flex gap-1">
-                  {[{ key: true, label: "Demo" }, { key: false, label: "Real" }].map((opt) => (
+                  {[
+                    { key: true, label: "Demo" },
+                    { key: false, label: "Real" },
+                  ].map((opt) => (
                     <button
                       key={String(opt.key)}
                       onClick={() => setEditIsDemo(opt.key)}
@@ -385,11 +407,13 @@ function AccountCard({ acc, onToggle, onRemove, onEdit, onRefresh }: {
           ) : (
             <div className="flex items-center gap-2">
               <span className="font-medium">{acc.label}</span>
-              <span className={`text-[10px] px-2 py-0.5 rounded-full ${
-                acc.is_demo
-                  ? "bg-warning/10 text-warning border border-warning/30"
-                  : "bg-info/10 text-info border border-info/30"
-              }`}>
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded-full ${
+                  acc.is_demo
+                    ? "bg-warning/10 text-warning border border-warning/30"
+                    : "bg-info/10 text-info border border-info/30"
+                }`}
+              >
                 {acc.is_demo ? "DEMO" : "REAL"}
               </span>
             </div>
@@ -398,7 +422,11 @@ function AccountCard({ acc, onToggle, onRemove, onEdit, onRefresh }: {
         <div className="flex items-center gap-1">
           {!editing && (
             <button
-              onClick={() => { setEditLabel(acc.label); setEditIsDemo(acc.is_demo); setEditing(true); }}
+              onClick={() => {
+                setEditLabel(acc.label);
+                setEditIsDemo(acc.is_demo);
+                setEditing(true);
+              }}
               className="p-2 rounded-md text-muted-foreground hover:text-info hover:bg-info/10 transition-colors"
               title="Editar"
             >

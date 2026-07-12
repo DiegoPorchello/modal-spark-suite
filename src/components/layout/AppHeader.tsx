@@ -12,7 +12,10 @@ import {
   Volume2,
   VolumeX,
   Zap,
+  Settings,
 } from "lucide-react";
+
+import { AppSettingsPanel } from "./AppSettingsPanel";
 
 interface AppHeaderProps {
   onToggleSidebar: () => void;
@@ -52,7 +55,7 @@ export function AppHeader({
   onClearNotifications,
 }: AppHeaderProps) {
   const [notifOpen, setNotifOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const toggleFullscreen = () => {
@@ -140,7 +143,7 @@ export function AppHeader({
           <button
             onClick={() => {
               setNotifOpen(!notifOpen);
-              setSettingsOpen(false);
+              setSettingsPanelOpen(false);
             }}
             className="relative hover:text-foreground p-1.5 rounded-md hover:bg-accent/40 transition-colors"
           >
@@ -157,6 +160,16 @@ export function AppHeader({
             title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
           >
             {isFullscreen ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+          </button>
+          <button
+            onClick={() => {
+              setSettingsPanelOpen(!settingsPanelOpen);
+              setNotifOpen(false);
+            }}
+            className="hover:text-foreground p-1.5 rounded-md hover:bg-accent/40 transition-colors"
+            title={settingsPanelOpen ? "Fechar configurações" : "Abrir configurações"}
+          >
+            {settingsPanelOpen ? <X className="size-4" /> : <Settings className="size-4" />}
           </button>
           <div className="w-px h-6 bg-border mx-1" />
           <div className="flex items-center gap-2 panel px-3 py-1.5">
@@ -214,7 +227,10 @@ export function AppHeader({
                   {n.type === "info" && <Clock className="size-4 text-blue-400 mt-0.5 shrink-0" />}
                   <div className="flex-1 min-w-0">
                     <div className="truncate">{n.message}</div>
-                    <div className="text-[10px] text-muted-foreground mt-0.5" suppressHydrationWarning>
+                    <div
+                      className="text-[10px] text-muted-foreground mt-0.5"
+                      suppressHydrationWarning
+                    >
                       {n.time.toLocaleTimeString("pt-BR", {
                         hour: "2-digit",
                         minute: "2-digit",
@@ -227,6 +243,11 @@ export function AppHeader({
             )}
           </div>
         </div>
+      )}
+
+      {/* Settings Panel */}
+      {settingsPanelOpen && (
+        <AppSettingsPanel isOpen={settingsPanelOpen} onClose={() => setSettingsPanelOpen(false)} />
       )}
     </>
   );

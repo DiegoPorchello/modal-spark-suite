@@ -87,7 +87,9 @@ export class BinanceWsClient {
 
         // Filtra pares híbridos (não existem na Binance)
         const validSymbols = symbols.filter((s) => !HYBRID_SYMBOLS.has(s.toUpperCase()));
-        console.log(`[BinanceWs] ✅ CONECTADO — inscrevendo ${validSymbols.length} ativos (ignorados ${symbols.length - validSymbols.length} híbridos)`);
+        console.log(
+          `[BinanceWs] ✅ CONECTADO — inscrevendo ${validSymbols.length} ativos (ignorados ${symbols.length - validSymbols.length} híbridos)`,
+        );
 
         // Inscreve via SUBSCRIBE message
         const streams = validSymbols.map((s) => {
@@ -143,7 +145,6 @@ export class BinanceWsClient {
 
       // Busca histórico inicial para preencher o buffer
       this._fetchHistory(symbols);
-
     } catch (err) {
       engineLogger.error("BinanceWs", `Falha ao criar WebSocket`, { error: String(err) });
       this._scheduleReconnect();
@@ -157,9 +158,11 @@ export class BinanceWsClient {
         const binanceSymbol = (SYMBOL_MAP[symbol.toUpperCase()] ?? symbol).toUpperCase();
         const url = `${BINANCE_PROXY_URL}?symbol=${binanceSymbol}&interval=${this._interval}&limit=100`;
         const res = await fetch(url);
-        
+
         if (!res.ok) {
-          engineLogger.warn("BinanceWs", `Falha ao buscar histórico REST: ${symbol}`, { status: res.status });
+          engineLogger.warn("BinanceWs", `Falha ao buscar histórico REST: ${symbol}`, {
+            status: res.status,
+          });
           continue;
         }
 
@@ -183,7 +186,11 @@ export class BinanceWsClient {
           fed++;
         }
 
-        engineLogger.info("BinanceWs", `Histórico REST Binance: ${symbol} — ${fed} candles carregados`, { key });
+        engineLogger.info(
+          "BinanceWs",
+          `Histórico REST Binance: ${symbol} — ${fed} candles carregados`,
+          { key },
+        );
       } catch (err) {
         engineLogger.error("BinanceWs", `Erro ao buscar histórico REST para ${symbol}`, {
           error: String(err),
@@ -264,8 +271,6 @@ export class BinanceWsClient {
       }
     }
   }
-
-
 
   private _reverseSymbolMap(binanceSymbol: string): string | null {
     const upper = binanceSymbol.toUpperCase();
