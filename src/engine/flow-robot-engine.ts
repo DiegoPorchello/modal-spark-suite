@@ -712,7 +712,10 @@ export class FlowRobotEngine {
     // IDEMPOTÊNCIA: ignora candle já processado (mesmo timestamp + asset)
     const lastTime = FlowRobotEngine._lastProcessedCandle.get(candle.asset);
     if (lastTime !== undefined && lastTime >= candle.time) {
-      engineLogger.debug("FlowRobot", `⏭️ Candle duplicado ignorado (idempotência): ${candle.asset} @ ${new Date(candle.time).toLocaleTimeString("pt-BR")} (lastProcessed=${lastTime})`);
+      engineLogger.debug(
+        "FlowRobot",
+        `⏭️ Candle duplicado ignorado (idempotência): ${candle.asset} @ ${new Date(candle.time).toLocaleTimeString("pt-BR")} (lastProcessed=${lastTime})`,
+      );
       return;
     }
     FlowRobotEngine._lastProcessedCandle.set(candle.asset, candle.time);
@@ -1099,12 +1102,40 @@ export class FlowRobotEngine {
   private async _runOperationCycle(): Promise<void> {
     if (this._state.status !== "running" || FlowRobotEngine._isProcessing) {
       if (FlowRobotEngine._isProcessing) {
-        engineLogger.warn("FlowRobot", "⏭️ _runOperationCycle ignorado — já processando (guarda estática)", {
-          isProcessing: FlowRobotEngine._isProcessing,
-        });
+        engineLogger.warn(
+          "FlowRobot",
+          "⏭️ _runOperationCycle ignorado — já processando (guarda estática)",
+          {
+            isProcessing: FlowRobotEngine._isProcessing,
+          },
+        );
       }
       return;
     }
+    // ══ TRAVA: trade pendente ou análise em andamento? ══
+    if (this._state.activeOperation) {
+      const pendente = this._state.activeOperation;
+      engineLogger.warn("FlowRobot", "⏳ Entrada bloqueada — operação anterior ainda pendente", {
+        operationId: pendente.id,
+        asset: pendente.asset,
+        direction: pendente.direction,
+        status: pendente.status,
+      });
+      FlowRobotEngine._isProcessing = false;
+      this._scheduleNextOperation(5);
+      return;
+    }
+    if (this._state.nextTrade) {
+      engineLogger.warn("FlowRobot", "⏳ Entrada bloqueada — trade já na fila do ExecutionEngine", {
+        symbol: this._state.nextTrade.symbol,
+        direction: this._state.nextTrade.direction,
+        amount: this._state.nextTrade.amount,
+      });
+      FlowRobotEngine._isProcessing = false;
+      this._scheduleNextOperation(5);
+      return;
+    }
+
     FlowRobotEngine._isProcessing = true;
 
     // ══ DIAGNÓSTICO DO CICLO ══

@@ -9,6 +9,7 @@ import {
   Copy,
   Circle,
 } from "lucide-react";
+import { ClientTime } from "../ui/ClientTime";
 
 type NavKey =
   | "dashboard"
@@ -131,13 +132,15 @@ export function AppSidebar({ active, onNavigate, isOpen, robotState }: AppSideba
           {robotState.sessionInfo?.nextTransition && (
             <div className="flex justify-between">
               <span>Próxima mudança</span>
-              <span className="text-foreground font-mono" suppressHydrationWarning>
-                {robotState.sessionInfo.nextTransition instanceof Date
-                  ? robotState.sessionInfo.nextTransition.toLocaleTimeString("pt-BR", {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })
-                  : ""}
+              <span className="text-foreground font-mono">
+                <ClientTime
+                  timestamp={
+                    robotState.sessionInfo.nextTransition instanceof Date
+                      ? robotState.sessionInfo.nextTransition
+                      : new Date(robotState.sessionInfo.nextTransition)
+                  }
+                  options={{ hour: "2-digit", minute: "2-digit" }}
+                />
               </span>
             </div>
           )}

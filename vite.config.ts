@@ -10,4 +10,54 @@ export default defineConfig({
   tanstackStart: {
     server: { entry: "server" },
   },
+  vite: {
+    server: {
+      proxy: {
+        "/api": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/trades": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/balance": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/active": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/ws2-session": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/login": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/logs": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/copy": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/health": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/history": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+        "/binance-klines": {
+          target: "http://127.0.0.1:3001",
+          changeOrigin: true,
+        },
+      },
+    },
+  },
 });

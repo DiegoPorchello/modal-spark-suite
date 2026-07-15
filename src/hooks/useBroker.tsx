@@ -49,6 +49,7 @@ interface BrokerContextValue {
   clearError: () => void;
   clearCriticalAuthError: () => void;
   triggerCriticalAuthError: (error: Omit<CriticalAuthError, "timestamp">) => void;
+  getToken: () => string | null;
 }
 
 const BrokerContext = createContext<BrokerContextValue | null>(null);
@@ -128,6 +129,10 @@ export function BrokerProvider({ children }: { children: ReactNode }) {
 
   const clearError = useCallback(() => setError(null), []);
 
+  const getToken = useCallback((): string | null => {
+    return adapter?.getToken?.() ?? null;
+  }, [adapter]);
+
   useEffect(() => {
     return () => {
       adapterRef.current?.disconnect().catch(() => {});
@@ -151,6 +156,7 @@ export function BrokerProvider({ children }: { children: ReactNode }) {
         clearError,
         clearCriticalAuthError,
         triggerCriticalAuthError,
+        getToken,
       }}
     >
       {children}

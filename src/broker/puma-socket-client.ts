@@ -78,6 +78,8 @@ export interface PumaSocketClientOptions {
   onConnect?: () => void;
   onDisconnect?: (reason: string) => void;
   onError?: (error: string) => void;
+  /** Chamado quando uma trade fecha com resultado final (WIN/LOSS/DRAW) */
+  onTradeResult?: (data: TradeResultData) => void;
   /** Chamado quando o JWT precisa ser renovado. Deve retornar um novo JWT. */
   onRefreshJwt?: () => Promise<string>;
 }
@@ -111,6 +113,13 @@ export interface TradeUpdateData {
   raw: Record<string, unknown>;
 }
 
+export interface TradeResultData {
+  id: string;
+  status: string;
+  profit: number;
+  raw: Record<string, unknown>;
+}
+
 type ConnectionState = "idle" | "connecting" | "ready";
 
 export class PumaSocketClient {
@@ -129,6 +138,7 @@ export class PumaSocketClient {
   private _onTick: ((data: TickData) => void) | null = null;
   private _onCandle: ((data: CandleData) => void) | null = null;
   private _onTradeUpdate: ((data: TradeUpdateData) => void) | null = null;
+  private _onTradeResult: ((data: TradeResultData) => void) | null = null;
   private _onConnect: (() => void) | null = null;
   private _onDisconnect: ((reason: string) => void) | null = null;
   private _onError: ((error: string) => void) | null = null;
@@ -151,6 +161,7 @@ export class PumaSocketClient {
     this._onTick = options.onTick ?? null;
     this._onCandle = options.onCandle ?? null;
     this._onTradeUpdate = options.onTradeUpdate ?? null;
+    this._onTradeResult = options.onTradeResult ?? null;
     this._onConnect = options.onConnect ?? null;
     this._onDisconnect = options.onDisconnect ?? null;
     this._onError = options.onError ?? null;
@@ -186,6 +197,9 @@ export class PumaSocketClient {
   /* ── Connection ──────────────────────────────────────────────────────────── */
 
   connect(): void {
+    console.log("╔═══════════════════════════════════════════════════════════════╗");
+    console.log("║  🚀  PumaSocketClient.connect() CHAMADO                      ║");
+    console.log("╚═══════════════════════════════════════════════════════════════╝");
     this.disconnect();
     this._state = "connecting";
     this._connected = false;
@@ -237,6 +251,9 @@ export class PumaSocketClient {
   /* ── Namespace /trades ──────────────────────────────────────────────────── */
 
   private _connectTradesNamespace(): void {
+    console.log("╔═══════════════════════════════════════════════════════════════╗");
+    console.log("║  🔌  INICIANDO CONEXÃO /trades NAMESPACE                       ║");
+    console.log("╚═══════════════════════════════════════════════════════════════╝");
     engineLogger.info("PumaSocketClient", "Conectando namespace /trades...", {});
 
     this._tradesSocket = io(PUMA_URL + "/trades", {
@@ -249,10 +266,19 @@ export class PumaSocketClient {
       timeout: 10000,
     });
 
+    console.log(
+      "[PumaSocket] 🔌 io() retornou socket, id:",
+      this._tradesSocket?.id,
+      "| connected:",
+      this._tradesSocket?.connected,
+    );
     console.log("[PumaSocket] trades opts:", JSON.stringify(this._tradesSocket.io.opts, null, 2));
 
     this._tradesSocket.on("connect", () => {
       this._tradesConnected = true;
+      console.log("╔═══════════════════════════════════════════════════════════════╗");
+      console.log("║  ✅  Socket /trades CONECTADO                                ║");
+      console.log("╚═══════════════════════════════════════════════════════════════╝");
       console.log(
         "[PumaSocket] ✅ /trades CONECTADO — socketId:",
         this._tradesSocket?.id,
@@ -306,7 +332,15 @@ export class PumaSocketClient {
       this._handleTradeUpdate(data);
     });
 
+    this._tradesSocket.on("tradeResult", (data: Record<string, unknown>) => {
+      this._handleTradeResult(data);
+    });
+
     this._tradesSocket.on("connect_error", (err: Error) => {
+      console.log("╔═══════════════════════════════════════════════════════════════╗");
+      console.log("║  ❌  SOCKET /trades CONNECT_ERROR                            ║");
+      console.log("║  message:", String(err.message).slice(0, 50).padEnd(51), "║");
+      console.log("╚═══════════════════════════════════════════════════════════════╝");
       engineLogger.error("PumaSocketClient", "❌ Erro ao conectar /trades", {
         message: err.message,
         stack: err.stack,
@@ -486,6 +520,12 @@ export class PumaSocketClient {
     const tradeId = String(data.id ?? "");
     const status = String(data.status ?? "ACTIVE");
 
+    console.log("╔═══════════════════════════════════════════════════════════════╗");
+    console.log("║  📊  tradeUpdate RECEBIDO                                    ║");
+    console.log("║  tradeId:", tradeId.padEnd(52), "║");
+    console.log("║  status:", status.padEnd(52), "║");
+    console.log("║  symbol:", String(data.symbol ?? "").padEnd(52), "║");
+    console.log("╚═══════════════════════════════════════════════════════════════╝");
     console.log("[DEBUG-TRADE] 📊 tradeUpdate RAW payload:", JSON.stringify(data, null, 2));
     console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol });
 
@@ -503,6 +543,36 @@ export class PumaSocketClient {
       exitPrice: data.exitPrice as string,
       direction: data.direction as string,
       amount: data.amount as number,
+      raw: data,
+    });
+  }
+
+  private _handleTradeResult(data: Record<string, unknown>): void {
+    if (!data) return;
+
+    const tradeId = String(data.id ?? data.tradeId ?? data.orderId ?? "");
+    const status = String(data.status ?? data.result ?? "UNKNOWN");
+    const profit = Number(data.profit ?? data.pnl ?? 0);
+
+    if (!tradeId) return;
+
+    console.log("╔═══════════════════════════════════════════════════════════════╗");
+    console.log("║  🏁  TRADE RESULT RECEBIDO                                   ║");
+    console.log("║  tradeId:", tradeId.padEnd(52), "║");
+    console.log("║  status:", status.padEnd(52), "║");
+    console.log("║  profit:", profit.toFixed(2).padEnd(52), "║");
+    console.log("╚═══════════════════════════════════════════════════════════════╝");
+
+    engineLogger.info("PumaSocketClient", "🏁 Trade result recebido", {
+      tradeId,
+      status,
+      profit,
+    });
+
+    this._onTradeResult?.({
+      id: tradeId,
+      status,
+      profit,
       raw: data,
     });
   }

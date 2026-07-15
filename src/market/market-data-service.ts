@@ -21,7 +21,12 @@ import {
   type TradeUpdateData,
 } from "../broker/puma-socket-client";
 
-export type { TickData, CandleData, TradeUpdateData } from "../broker/puma-socket-client";
+export type {
+  TickData,
+  CandleData,
+  TradeUpdateData,
+  TradeResultData,
+} from "../broker/puma-socket-client";
 import { SYMBOL_MAP } from "../broker/binance-ws-client";
 
 const BINANCE_PROXY_URL = "http://127.0.0.1:3001/binance-klines";
@@ -37,6 +42,7 @@ export interface PumaMarketDataServiceOptions {
   onCandleUpdate?: (symbol: string, candle: Candle) => void;
   onTick?: (data: TickData) => void;
   onTradeUpdate?: (data: TradeUpdateData) => void;
+  onTradeResult?: (data: TradeResultData) => void;
   onRefreshJwt?: () => Promise<string>;
 }
 
@@ -75,6 +81,7 @@ export class PumaMarketDataService {
       onTick: (data) => this._handleTick(data),
       onCandle: (data) => this._handleCandle(data),
       onTradeUpdate: (data) => this._handleTradeUpdate(data),
+      onTradeResult: (data) => this._handleTradeResult(data),
       onConnect: () => this._handleConnect(),
       onDisconnect: (reason) => this._handleDisconnect(reason),
       onError: (error) => this._handleError(error),
@@ -348,6 +355,15 @@ export class PumaMarketDataService {
       symbol: data.symbol,
     });
     this._options.onTradeUpdate?.(data);
+  }
+
+  private _handleTradeResult(data: TradeResultData): void {
+    console.log("[DEBUG-TRADE] 🏁 MarketDataService forwarding tradeResult:", {
+      id: data.id,
+      status: data.status,
+      profit: data.profit,
+    });
+    this._options.onTradeResult?.(data);
   }
 
   /* ── Queries ─────────────────────────────────────────────────────────────── */

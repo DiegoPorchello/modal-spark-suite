@@ -232,10 +232,14 @@ export class PumaWs2Client {
 
       // Log do valor exato do token sendo enviado
       const tokenPreview = token ? `${token.slice(0, 20)}... (len=${token.length})` : "NULL";
-      engineLogger.info("PumaWs2Client", `═══ _doConnect: token=${tokenPreview} | useProxy=${useProxy} ═══`, {
-        tokenLength: token?.length ?? 0,
-        assets: this._options.assets.join(", "),
-      });
+      engineLogger.info(
+        "PumaWs2Client",
+        `═══ _doConnect: token=${tokenPreview} | useProxy=${useProxy} ═══`,
+        {
+          tokenLength: token?.length ?? 0,
+          assets: this._options.assets.join(", "),
+        },
+      );
 
       if (useProxy) {
         const url = `${WS2_PROXY_URL}?token=${encodeURIComponent(token)}`;

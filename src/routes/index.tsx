@@ -906,7 +906,8 @@ function BrokerCard() {
   const [showPassword, setShowPassword] = useState(false);
 
   if (!connected) {
-    const handleLogin = async () => {
+    const handleLogin = async (e: React.FormEvent) => {
+      e.preventDefault();
       if (!loginEmail || !loginPassword) {
         setLoginError("Preencha email e senha");
         return;
@@ -948,65 +949,71 @@ function BrokerCard() {
           </span>
         </div>
         <div className="space-y-3">
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1">Email</label>
-            <input
-              type="email"
-              value={loginEmail}
-              onChange={(e) => setLoginEmail(e.target.value)}
-              placeholder="email@exemplo.com"
-              className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm focus:border-info focus:outline-none"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1">Senha</label>
-            <div className="relative">
+          <form onSubmit={handleLogin}>
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Email</label>
               <input
-                type={showPassword ? "text" : "password"}
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm pr-9 focus:border-info focus:outline-none"
+                type="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                placeholder="email@exemplo.com"
+                className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm focus:border-info focus:outline-none"
+                required
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              >
-                {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-              </button>
             </div>
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground block mb-1">Tipo de conta</label>
-            <div className="flex gap-2 mt-1">
-              {[
-                { key: "demo" as const, label: "Demo" },
-                { key: "real" as const, label: "Real" },
-              ].map((opt) => (
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Senha</label>
+              <div className="relative">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-background border border-border rounded-md px-3 py-2 text-sm pr-9 focus:border-info focus:outline-none"
+                  autoComplete="current-password"
+                  required
+                />
                 <button
-                  key={opt.key}
-                  onClick={() => setLoginAccountType(opt.key)}
-                  className={`px-4 py-2 rounded-md text-sm border transition-colors ${loginAccountType === opt.key ? "bg-info/20 border-info/50 text-info" : "bg-background border-border text-muted-foreground hover:border-info/30"}`}
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 >
-                  {opt.label}
+                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
-              ))}
+              </div>
             </div>
-          </div>
-          {loginError && (
-            <div className="text-xs text-danger flex items-center gap-2">
-              <AlertTriangle className="size-3.5 shrink-0" />
-              <span>{loginError}</span>
+            <div>
+              <label className="text-xs text-muted-foreground block mb-1">Tipo de conta</label>
+              <div className="flex gap-2 mt-1">
+                {[
+                  { key: "demo" as const, label: "Demo" },
+                  { key: "real" as const, label: "Real" },
+                ].map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setLoginAccountType(opt.key)}
+                    className={`px-4 py-2 rounded-md text-sm border transition-colors ${loginAccountType === opt.key ? "bg-info/20 border-info/50 text-info" : "bg-background border-border text-muted-foreground hover:border-info/30"}`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          )}
-          <button
-            onClick={handleLogin}
-            disabled={loggingIn}
-            className="w-full py-2 rounded-md bg-success text-success-foreground text-xs font-semibold tracking-wider hover:bg-success/90 disabled:opacity-50"
-          >
-            {loggingIn ? "CONECTANDO..." : "CONECTAR"}
-          </button>
+            {loginError && (
+              <div className="text-xs text-danger flex items-center gap-2">
+                <AlertTriangle className="size-3.5 shrink-0" />
+                <span>{loginError}</span>
+              </div>
+            )}
+            <button
+              type="submit"
+              disabled={loggingIn}
+              className="w-full py-2 rounded-md bg-success text-success-foreground text-xs font-semibold tracking-wider hover:bg-success/90 disabled:opacity-50"
+            >
+              {loggingIn ? "CONECTANDO..." : "CONECTAR"}
+            </button>
+          </form>
         </div>
       </div>
     );
@@ -1829,54 +1836,311 @@ function FinancePanel() {
 
 function HistoryPanel() {
   const { state } = useRobot();
-  const completedOps = state.operations.filter((o) => o.status === "completed").slice(0, 5);
+  const { getToken } = useBroker();
+  const [trades, setTrades] = useState<
+    Array<{
+      id: string;
+      asset: string;
+      direction: string;
+      amount: number;
+      entryPrice: number;
+      payout: number;
+      status: string;
+      profit: number;
+      result: string;
+      openedAt: number;
+      expiresAt?: string;
+      expiration?: number;
+    }>
+  >([]);
+
+  // Cache para operações que ainda estão PENDING/ACTIVE e precisam de polling individual
+  const pendingPollsRef = useRef<Map<string, ReturnType<typeof setInterval>>>(new Map());
+
+  const buildHeaders = useCallback((): HeadersInit => {
+    const token = getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, [getToken]);
+
+  const fetchTrades = useCallback(async () => {
+    try {
+      const res = await fetch("http://127.0.0.1:3001/trades", { headers: buildHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.trades) {
+          setTrades((prev) => {
+            const resolvedMap = new Map(
+              prev
+                .filter((t) => t.result === "WIN" || t.result === "LOSS" || t.result === "DRAW")
+                .map((t) => [t.id, t]),
+            );
+            return data.trades.map((t: (typeof prev)[0]) => {
+              const resolved = resolvedMap.get(t.id);
+              if (resolved && (t.result === "PENDING" || t.result === "ACTIVE" || !t.result)) {
+                return { ...t, result: resolved.result, status: resolved.status, profit: resolved.profit };
+              }
+
+              // Infere WIN/LOSS pelo profit se daemon ainda retorna PENDING
+              let result = t.result ?? "";
+              let status = t.status ?? "";
+              if (result === "PENDING" || result === "ACTIVE" || result === "" || !result) {
+                if (t.profit < 0) { result = "LOSS"; status = "LOSS"; }
+                else if (t.profit > 0) { result = "WIN"; status = "WIN"; }
+              }
+
+              return { ...t, result, status };
+            });
+          });
+        }
+      }
+    } catch (e) {
+      console.warn("Falha ao buscar histórico:", e);
+    }
+  }, [buildHeaders]);
+
+  // Poll individual para uma operação específica até resolver (WIN/LOSS/DRAW)
+  const pollTradeUntilResolved = useCallback(
+    async (tradeId: string, maxAttempts = 10) => {
+      // Evita polling duplicado
+      if (pendingPollsRef.current.has(tradeId)) return;
+
+      let attempts = 0;
+      const pollInterval = setInterval(async () => {
+        attempts++;
+        try {
+          const res = await fetch(`http://127.0.0.1:3001/trades/${tradeId}`, {
+            headers: buildHeaders(),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const status = (data.status || data.result || "").toString().toUpperCase();
+
+            if (status === "WIN" || status === "LOSS" || status === "DRAW") {
+              // Resolveu! Atualiza o estado local
+              setTrades((prev) => prev.map((t) => (t.id === tradeId ? { ...t, ...data } : t)));
+              clearInterval(pollInterval);
+              pendingPollsRef.current.delete(tradeId);
+              return;
+            }
+
+            // Ainda ativo, atualiza status intermediário
+            setTrades((prev) => prev.map((t) => (t.id === tradeId ? { ...t, ...data } : t)));
+          }
+        } catch (e) {
+          console.warn(`Polling falhou para ${tradeId}:`, e);
+        }
+
+        // Para depois de maxAttempts (ex: 10 * 3s = 30s)
+        if (attempts >= maxAttempts) {
+          clearInterval(pollInterval);
+          pendingPollsRef.current.delete(tradeId);
+        }
+      }, 3000);
+
+      pendingPollsRef.current.set(tradeId, pollInterval);
+    },
+    [buildHeaders],
+  );
+
+  useEffect(() => {
+    fetchTrades();
+    // Polling a cada 5s para capturar WIN/LOSS rapidamente
+    const interval = setInterval(fetchTrades, 5000);
+
+    // Cleanup polling individual ao desmontar
+    return () => {
+      clearInterval(interval);
+      pendingPollsRef.current.forEach((timer) => clearInterval(timer));
+      pendingPollsRef.current.clear();
+    };
+  }, [fetchTrades]);
+
+  // Mescla operações locais (já resolvidas) + servidor (PENDING/ACTIVE/WIN/LOSS)
+  const allOps = (() => {
+    const localOps = state.operations.map((o) => ({
+      id: o.id,
+      asset: o.asset,
+      direction: o.direction,
+      amount: o.amount,
+      entryPrice: o.entryPrice ?? 0,
+      payout: o.payout ?? 0,
+      status:
+        o.status === "completed"
+          ? o.result === "win"
+            ? "WIN"
+            : o.result === "draw"
+              ? "DRAW"
+              : "LOSS"
+          : o.status.toUpperCase(),
+      profit: o.profit,
+      result: o.result ?? "",
+      openedAt: o.openedAt ?? 0,
+      expiresAt: undefined as string | undefined,
+      expiration: undefined as number | undefined,
+    }));
+    const localById = new Map(localOps.map((o) => [o.id, o]));
+
+    const serverOps = trades
+      .filter((t) => !localById.has(t.id))
+      .map((t) => {
+        let status =
+          t.result && t.result !== "" && t.result !== "PENDING" && t.result !== "ACTIVE"
+            ? t.result.toUpperCase()
+            : (t.status?.toUpperCase() ?? "PENDING");
+
+        // Se o daemon ainda retorna PENDING mas o profit já veio, infere o resultado
+        if ((status === "PENDING" || status === "ACTIVE") && t.profit !== undefined && t.profit !== null) {
+          if (t.profit < 0) status = "LOSS";
+          else if (t.profit > 0) status = "WIN";
+        }
+
+        // Se ainda está PENDING/ACTIVE, inicia polling individual
+        if (status === "PENDING" || status === "ACTIVE") {
+          pollTradeUntilResolved(t.id);
+        }
+
+        return {
+          id: t.id,
+          asset: t.asset,
+          direction: t.direction,
+          amount: t.amount,
+          entryPrice: t.entryPrice ?? 0,
+          payout: t.payout ?? 0,
+          status,
+          profit: t.profit ?? 0,
+          result: status !== "PENDING" && status !== "ACTIVE" ? status : (t.result ?? ""),
+          openedAt: t.openedAt ?? 0,
+          expiresAt: t.expiresAt,
+          expiration: t.expiration,
+        };
+      });
+
+    return [...localOps, ...serverOps]
+      .sort((a, b) => ((b.openedAt ?? 0) as number) - ((a.openedAt ?? 0) as number))
+      .slice(0, 8);
+  })();
+
+  const fmtTime = (ts: number) =>
+    ts
+      ? new Date(ts).toLocaleTimeString("pt-BR", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : "—";
+
+  const getCloseTime = (op: (typeof allOps)[0]) => {
+    if (op.expiresAt) {
+      const d = new Date(op.expiresAt);
+      if (!isNaN(d.getTime()))
+        return d.toLocaleTimeString("pt-BR", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+    }
+    if (op.expiration && op.openedAt) return fmtTime(op.openedAt + op.expiration * 1000);
+    if (op.openedAt) return fmtTime(op.openedAt + 60000); // fallback M1
+    return "—";
+  };
+
+  const getStatusLabel = (status: string, result: string) => {
+    const s = status.toUpperCase();
+    const r = (result || "").toUpperCase();
+    if (r === "WIN" || s === "WIN") return "WIN";
+    if (r === "LOSS" || s === "LOSS") return "LOSS";
+    if (r === "DRAW" || s === "DRAW") return "DRAW";
+    if (s === "ACTIVE") return "ATIVA";
+    return "PENDENTE";
+  };
+
+  const getStatusColor = (status: string, result: string) => {
+    const label = getStatusLabel(status, result);
+    if (label === "WIN") return "text-success font-bold";
+    if (label === "LOSS") return "text-danger font-bold";
+    if (label === "DRAW") return "text-muted-foreground font-semibold";
+    return "text-warning font-semibold animate-pulse";
+  };
 
   return (
     <div className="panel col-span-8 p-4">
       <div className="flex justify-between items-center mb-3">
         <h3 className="text-sm font-semibold">HISTÓRICO RECENTE</h3>
-        <button className="text-[10px] text-success hover:underline">VER TODAS</button>
+        <div className="flex items-center gap-3">
+          <span className="text-[10px] text-muted-foreground">{allOps.length} op.</span>
+          <button onClick={fetchTrades} className="text-[10px] text-success hover:underline">
+            ATUALIZAR
+          </button>
+        </div>
       </div>
-      <div className="space-y-2">
-        {completedOps.length === 0 && (
+      {/* Cabeçalho */}
+      <div className="grid grid-cols-7 gap-1 text-[10px] text-muted-foreground tracking-widest px-3 pb-2 border-b border-border">
+        <span>ENTRADA</span>
+        <span>FECHAMENTO</span>
+        <span>PAR</span>
+        <span>DIREÇÃO</span>
+        <span>RESULTADO</span>
+        <span className="text-right">VALOR</span>
+        <span className="text-right">LUCRO</span>
+      </div>
+      <div className="space-y-1 mt-2">
+        {allOps.length === 0 && (
           <div className="text-xs text-muted-foreground text-center py-4">
             Nenhuma operação ainda
           </div>
         )}
-        {completedOps.map((op) => {
-          const hora = new Date(op.openedAt).toLocaleTimeString("pt-BR", {
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-          const dir = op.direction.toUpperCase();
-          const res = op.result.toUpperCase();
+        {allOps.map((op) => {
+          const statusLabel = getStatusLabel(op.status, op.result);
+          const isPending = statusLabel === "ATIVA" || statusLabel === "PENDENTE";
           const fmt =
             (op.profit >= 0 ? "+" : "") +
             op.profit.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+          const fmtAmount = op.amount.toLocaleString("pt-BR", {
+            style: "currency",
+            currency: "BRL",
+          });
           return (
             <div
               key={op.id}
-              className="grid grid-cols-5 gap-2 text-xs items-center bg-secondary/30 rounded px-3 py-2"
+              className={`grid grid-cols-7 gap-1 text-xs items-center rounded px-3 py-2 ${
+                isPending
+                  ? "bg-warning/5 border border-warning/20"
+                  : statusLabel === "WIN"
+                    ? "bg-success/5 border border-success/10"
+                    : statusLabel === "LOSS"
+                      ? "bg-danger/5 border border-danger/10"
+                      : "bg-secondary/30"
+              }`}
             >
-              <span className="text-muted-foreground font-mono">{hora}</span>
-              <span className="col-span-1 truncate">{op.asset}</span>
+              <span className="text-muted-foreground font-mono text-[10px]">
+                {fmtTime(op.openedAt)}
+              </span>
+              <span className="text-muted-foreground font-mono text-[10px]">
+                {getCloseTime(op)}
+              </span>
+              <span className="truncate">{op.asset}</span>
               <span
                 className={
-                  dir === "CALL" ? "text-success font-semibold" : "text-danger font-semibold"
+                  op.direction === "CALL"
+                    ? "text-success font-semibold"
+                    : "text-danger font-semibold"
                 }
               >
-                {dir}
+                {op.direction}
               </span>
               <span
                 className={
-                  res === "WIN"
+                  statusLabel === "WIN"
                     ? "text-success"
-                    : res === "DRAW"
+                    : statusLabel === "DRAW"
                       ? "text-muted-foreground"
                       : "text-danger"
                 }
               >
-                {res}
+                {statusLabel}
+              </span>
+              <span className="text-right font-mono text-[10px] text-muted-foreground">
+                {fmtAmount}
               </span>
               <span
                 className={`text-right font-mono font-semibold ${op.result === "draw" ? "text-muted-foreground" : op.profit >= 0 ? "text-success" : "text-danger"}`}
@@ -1969,8 +2233,9 @@ function NewOperationModal({
     if (!activeOperation) return;
 
     const calculateRemainingTime = () => {
-      if (!activeOperation) return 0;
-      const endTime = new Date(activeOperation.openedAt).getTime() + 60000;
+      const openedAt = new Date(activeOperation.openedAt).getTime();
+      if (!openedAt) return 0;
+      const endTime = openedAt + 60000;
       const now = Date.now();
       const remainingMs = Math.max(0, endTime - now);
       return Math.round(remainingMs / 1000);
@@ -1982,6 +2247,8 @@ function NewOperationModal({
       const calculated = calculateRemainingTime();
       setRemainingTime(calculated);
       if (calculated <= 0) {
+        clearInterval(countdownInterval.current);
+        countdownInterval.current = null;
         onClose();
       }
     }, 1000);
@@ -1989,6 +2256,7 @@ function NewOperationModal({
     return () => {
       if (countdownInterval.current) {
         clearInterval(countdownInterval.current);
+        countdownInterval.current = null;
       }
     };
   }, [activeOperation, onClose]);
