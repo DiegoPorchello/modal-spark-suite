@@ -1,4 +1,4 @@
-import type { SorosGaleOperation, SorosGaleConfig, DailyBreakdown } from "./SmartRecoveryTypes";
+import type { SorosGaleOperation, SorosGaleConfig, DailyBreakdown, OperationOutcome } from "./SmartRecoveryTypes";
 
 export class SmartRecoveryHistory {
   private operations: SorosGaleOperation[] = [];
@@ -45,6 +45,80 @@ export class SmartRecoveryHistory {
 
   getLosses(): SorosGaleOperation[] {
     return this.operations.filter((op) => op.result === "LOSS");
+  }
+
+  getOperationsAtLevel(level: number): SorosGaleOperation[] {
+    return this.operations.filter((op) => op.level === level);
+  }
+
+  getWinRateAtLevel(level: number): number {
+    const ops = this.getOperationsAtLevel(level);
+    if (ops.length === 0) return 0;
+    const wins = ops.filter((o) => o.result === "WIN").length;
+    return parseFloat(((wins / ops.length) * 100).toFixed(1));
+  }
+
+  getLevelCycleCount(): Map<number, number> {
+    const counts = new Map<number, number>();
+    for (const op of this.operations) {
+      counts.set(op.level, (counts.get(op.level) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+  getLastResultsAtLevel(level: number, n: number): OperationOutcome[] {
+    return this.operations
+      .filter((op) => op.level === level)
+      .slice(-n)
+      .map((op) => op.result);
+  }
+
+  getRecoverySuccessRate(): { success: number; failed: number; rate: number } {
+    let success = 0;
+    let failed = 0;
+    let i = 0;
+    while (i < this.operations.length) {
+      if (this.operations[i].result === "LOSS") {
+        let sawWin = false;
+        let j = i + 1;
+        while (j < this.operations.length && this.operations[j].level > 0) {
+          if (this.operations[j].result === "WIN") sawWin = true;
+          j++;
+        }
+        if (sawWin) success++;
+        else failed++;
+        i = j;
+      } else {
+        i++;
+      }
+    }
+    const total = success + failed;
+    return {
+      success,
+      failed,
+      rate: total > 0 ? parseFloat(((success / total) * 100).toFixed(1)) : 100,
+    };
+  }
+
+  isLevelOscillating(level: number, threshold: number = 3): boolean {
+    const seq: number[] = [];
+    for (const op of this.operations) {
+      seq.push(op.level);
+    }
+    let transitions = 0;
+    for (let i = 1; i < seq.length; i++) {
+      if (seq[i] === level && seq[i - 1] !== level) {
+        transitions++;
+      }
+    }
+    return transitions >= threshold;
+  }
+
+  getAverageStakeAtLevel(level: number): number {
+    const ops = this.getOperationsAtLevel(level);
+    if (ops.length === 0) return 0;
+    const sum = ops.reduce((acc, op) => acc + op.stake, 0);
+    return parseFloat((sum / ops.length).toFixed(2));
   }
 
   getConsecutiveSequence(): { wins: number; losses: number } {

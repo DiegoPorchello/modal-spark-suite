@@ -8,6 +8,7 @@ import type { Candle, MarketState, Timeframe } from "./types";
 
 export type { Candle, CandleAnalysis, MarketState, Timeframe } from "./types";
 export { CandleBuffer } from "./candle-buffer";
+export type { BufferState, BufferStateInfo, CandleBufferOptions, CandleAddResult } from "./candle-buffer";
 export { PumaMarketDataService } from "./market-data-service";
 export type { PumaMarketDataServiceOptions } from "./market-data-service";
 

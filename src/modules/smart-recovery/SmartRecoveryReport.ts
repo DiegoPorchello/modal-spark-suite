@@ -174,10 +174,12 @@ export class SmartRecoveryReport {
     const a = document.createElement("a");
     a.href = url;
     a.download = filename;
-    document.body.appendChild(a);
+    a.style.display = "none";
     a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    // Clean up after a microtask to avoid DOM conflicts with React
+    requestAnimationFrame(() => {
+      URL.revokeObjectURL(url);
+    });
   }
 
   downloadCSV(data: any): void {

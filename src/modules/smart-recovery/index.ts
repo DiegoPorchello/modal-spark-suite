@@ -2,6 +2,7 @@ export { SmartRecoveryEngine } from "./SmartRecoveryEngine";
 export { SmartRecoveryCalculator } from "./SmartRecoveryCalculator";
 export { SmartRecoverySimulator } from "./SmartRecoverySimulator";
 export { SmartRecoveryReport } from "./SmartRecoveryReport";
+export { SmartRecoveryHistory } from "./SmartRecoveryHistory";
 export type {
   SmartRecoveryConfig,
   SmartRecoveryState,

@@ -13,7 +13,7 @@
  */
 
 import type { Candle } from "./types";
-import { CandleBuffer, type CandleBufferOptions } from "./candle-buffer";
+import { CandleBuffer, type CandleBufferOptions, type CandleAddResult } from "./candle-buffer";
 import {
   PumaSocketClient,
   type TickData,
@@ -40,6 +40,7 @@ export interface PumaMarketDataServiceOptions {
   bufferOptions?: CandleBufferOptions;
   onBufferReady?: (symbol: string, count: number) => void;
   onCandleUpdate?: (symbol: string, candle: Candle) => void;
+  onCandleClosed?: (symbol: string, candle: Candle) => void;
   onTick?: (data: TickData) => void;
   onTradeUpdate?: (data: TradeUpdateData) => void;
   onTradeResult?: (data: TradeResultData) => void;
@@ -67,6 +68,7 @@ export class PumaMarketDataService {
     "XRPSOLUSDT",
   ]);
   private _candleCounts = new Map<string, number>();
+  private _prefilledAssets = new Set<string>();
 
   constructor(options: PumaMarketDataServiceOptions) {
     this.instanceId = PumaMarketDataService._nextId++;
@@ -135,6 +137,7 @@ export class PumaMarketDataService {
     this._connected = false;
     this._bufferReadySymbols.clear();
     this._candleCounts.clear();
+    this._prefilledAssets.clear();
   }
 
   /* ── External Candle Feed ────────────────────────────────────────────────── */
@@ -144,9 +147,9 @@ export class PumaMarketDataService {
    * Usado pelo PumaBrokerAdapter para consolidar dados em um único buffer.
    */
   addCandleFromExternal(symbol: string, candle: Candle, isClosed: boolean = true): void {
-    const added = this._buffer.addCandle(symbol, candle, isClosed);
+    const result: CandleAddResult = this._buffer.addCandle(symbol, candle, isClosed, "history");
 
-    if (added) {
+    if (result === "added" || result === "closed") {
       const count = this._buffer.getBufferCount(symbol);
       this._candleCounts.set(symbol, count);
 
@@ -164,6 +167,12 @@ export class PumaMarketDataService {
       const minRequired = isHybrid ? this.HYBRID_THRESHOLD : this._buffer.minRequired;
       if (count >= minRequired && !this._bufferReadySymbols.has(symbol)) {
         this._bufferReadySymbols.add(symbol);
+
+        // Marca LIVE para fontes externas que atingiram mínimo
+        if (!this._prefilledAssets.has(symbol.toUpperCase())) {
+          this._buffer.markAsLive(symbol);
+        }
+
         engineLogger.info(
           "PumaMarketDataService",
           `═══ BUFFER PRONTO (externo): ${symbol} (${count} candles${isHybrid ? " híbrido" : ""}) ═══`,
@@ -172,7 +181,7 @@ export class PumaMarketDataService {
         this._options.onBufferReady?.(symbol, count);
       }
 
-      // Notificar atualização
+      // Notificar atualização (UI etc.)
       this._options.onCandleUpdate?.(symbol, candle);
     }
   }
@@ -239,7 +248,7 @@ export class PumaMarketDataService {
             volume: parseFloat(k[5] as string),
             asset: upperAsset,
           };
-          this._buffer.addCandle(upperAsset, candle, true);
+          this._buffer.addCandle(upperAsset, candle, true, "history");
           addedCount++;
         }
 
@@ -252,6 +261,10 @@ export class PumaMarketDataService {
           source: "Binance",
           interval: binanceInterval,
         });
+
+        // Pré-preenchimento completo → marca como LIVE (ativa proteção cronológica)
+        this._buffer.markAsLive(upperAsset);
+        this._prefilledAssets.add(upperAsset);
 
         if (total >= this._buffer.minRequired && !this._bufferReadySymbols.has(upperAsset)) {
           this._bufferReadySymbols.add(upperAsset);
@@ -315,9 +328,15 @@ export class PumaMarketDataService {
       });
     }
 
-    const isClosed = this._buffer.addCandle(data.symbol, candle, true);
+    const result: CandleAddResult = this._buffer.addCandle(data.symbol, candle, true, "realtime");
 
-    if (isClosed) {
+    // Notificar UI sempre que o candle for atualizado
+    if (result === "updated" || result === "closed" || result === "added") {
+      this._options.onCandleUpdate?.(data.symbol, candle);
+    }
+
+    // Apenas candle adicionado ou fechado → verificar buffer
+    if (result === "closed" || result === "added") {
       const count = this._buffer.getBufferCount(data.symbol);
       this._candleCounts.set(data.symbol, count);
 
@@ -336,6 +355,13 @@ export class PumaMarketDataService {
 
       if (count >= minRequired && !this._bufferReadySymbols.has(data.symbol)) {
         this._bufferReadySymbols.add(data.symbol);
+
+        // Marca LIVE apenas se não veio do pré-preenchimento Binance
+        // (híbridos ou ativos que atingiram mínimo via real-time)
+        if (!this._prefilledAssets.has(data.symbol.toUpperCase())) {
+          this._buffer.markAsLive(data.symbol);
+        }
+
         engineLogger.info(
           "PumaMarketDataService",
           `═══ BUFFER PRONTO: ${data.symbol} (${count} candles${isHybrid ? " híbrido" : ""}) ═══`,
@@ -343,8 +369,11 @@ export class PumaMarketDataService {
         );
         this._options.onBufferReady?.(data.symbol, count);
       }
+    }
 
-      this._options.onCandleUpdate?.(data.symbol, candle);
+    // Candle fechado → notificar consumidores pesados (FlowRobot, Indicadores, IA, Executor, Recovery)
+    if (result === "closed") {
+      this._options.onCandleClosed?.(data.symbol, candle);
     }
   }
 
@@ -392,6 +421,7 @@ export class PumaMarketDataService {
     this._buffer.clear();
     this._bufferReadySymbols.clear();
     this._candleCounts.clear();
+    this._prefilledAssets.clear();
     engineLogger.info("PumaMarketDataService", "═══ BUFFER LIMPO ═══", {});
   }
 

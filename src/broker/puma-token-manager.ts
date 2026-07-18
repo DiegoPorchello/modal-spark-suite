@@ -1,7 +1,6 @@
 import { engineLogger } from "../engine/logger";
 import type { LoginResponse } from "./puma-broker-adapter";
 
-// Extract the interface from puma-broker-adapter since it wasn't exported in types.ts
 export interface TokenLoginResponse {
   user: {
     id: string;
@@ -23,11 +22,17 @@ export interface TokenLoginResponse {
 
 const STORAGE_KEY = "puma_token_data";
 
+function isBrowser(): boolean {
+  return typeof window !== "undefined" && typeof localStorage !== "undefined";
+}
+
 export class PumaTokenManager {
   private _data: TokenLoginResponse | null = null;
 
   constructor() {
-    this._load();
+    if (isBrowser()) {
+      this._load();
+    }
   }
 
   private _getTokenInfo(token: string) {
@@ -50,6 +55,7 @@ export class PumaTokenManager {
   }
 
   private _load() {
+    if (!isBrowser()) return;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -72,6 +78,7 @@ export class PumaTokenManager {
 
   public save(data: TokenLoginResponse) {
     this._data = data;
+    if (!isBrowser()) return;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this._data));
       engineLogger.info("PumaTokenManager", "Token salvo no cache", {});
@@ -91,6 +98,7 @@ export class PumaTokenManager {
 
   public clear() {
     this._data = null;
+    if (!isBrowser()) return;
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {

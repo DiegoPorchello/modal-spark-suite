@@ -50,6 +50,7 @@ export interface OrderParams {
   expiration: number;
   entryPrice?: number;
   timeframe: string;
+  decidedAt?: number;
 }
 
 export interface OrderResult {
@@ -58,7 +59,7 @@ export interface OrderResult {
   message?: string;
 }
 
-export type OrderStatus = "ACTIVE" | "WIN" | "LOSS" | "DRAW" | "EXPIRED" | "CANCELED";
+export type OrderStatus = "ACTIVE" | "WIN" | "LOSS" | "DRAW" | "EXPIRED" | "CANCELED" | "UNKNOWN";
 
 export interface MarketPrice {
   asset: string;

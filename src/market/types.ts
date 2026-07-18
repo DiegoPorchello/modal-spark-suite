@@ -12,6 +12,7 @@ export interface Candle {
   volume: number;
   asset: string;
   verify?: string;
+  origin?: "history" | "realtime";
 }
 
 export interface CandleAnalysis {

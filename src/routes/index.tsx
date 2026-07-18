@@ -105,6 +105,38 @@ const NAV: { section: string; items: { key: NavKey; label: string; icon: NavIcon
   { section: "AJUDA", items: [{ key: "ajuda", label: "Suporte", icon: HelpCircle }] },
 ];
 
+const ASSET_FLAG_MAP: Record<string, string> = {
+  EURUSD: "🇪🇺",
+  GBPUSD: "🇬🇧",
+  USDJPY: "🇯🇵",
+  AUDUSD: "🇦🇺",
+  USDCAD: "🇨🇦",
+  NZDUSD: "🇳🇿",
+  USDCHF: "🇨🇭",
+  EURGBP: "🇪🇺",
+  BTCUSD: "₿",
+  ETHUSD: "Ξ",
+  XAUUSD: "🥇",
+  BETHUSDT: "Ξ",
+  BTSOLUSDT: "◎",
+  MAPEUSDT: "🟡",
+  XRDOGUSDT: "🐕",
+  XRPSOLUSDT: "✕",
+};
+
+function getAssetFlag(asset: string): string {
+  const upper = asset.toUpperCase().replace("/OTC", "").replace("/", "");
+  return ASSET_FLAG_MAP[upper] ?? "💱";
+}
+
+function getAssetDisplayName(asset: string): string {
+  const upper = asset.toUpperCase().replace("/OTC", "");
+  if (upper.length === 6 && !upper.includes("USD") && !upper.includes("USDT")) {
+    return `${upper.slice(0, 3)}/${upper.slice(3)}`;
+  }
+  return asset.replace("USD", "/USD").replace("USDT", "/USDT");
+}
+
 function Dashboard() {
   const [active, setActive] = useState<NavKey>("fluxo");
   const [timeframes, setTimeframes] = useState<("M1" | "M5" | "M15")[]>(["M1"]);
@@ -112,6 +144,7 @@ function Dashboard() {
   const [seconds, setSeconds] = useState<number>(0);
   const [chartTab, setChartTab] = useState<"grafico" | "estrutura">("grafico");
   const [modalOpen, setModalOpen] = useState<boolean>(false);
+  const [currentPayout, setCurrentPayout] = useState<number>(0);
   const {
     connected,
     userName,
@@ -124,6 +157,18 @@ function Dashboard() {
   const { stop } = useRobot();
   const store = useAnalystStore();
   const { state: robotState, engine, updateConfig } = useRobot();
+
+  useEffect(() => {
+    return () => console.log("[UNMOUNT] Dashboard");
+  }, []);
+
+  // ── Sync: state local de timeframes com o config do engine ──
+  useEffect(() => {
+    const engineTF = robotState.config.timeframes;
+    if (engineTF && engineTF.length > 0) {
+      setTimeframes(engineTF as ("M1" | "M5" | "M15")[]);
+    }
+  }, [robotState.config.timeframes]);
 
   // Notification system - real events from robot
   const [notifications, setNotifications] = useState<
@@ -350,6 +395,24 @@ function Dashboard() {
     }, 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Fetch real payout from broker
+  useEffect(() => {
+    if (!adapter || !connected) return;
+    const fetchPayout = async () => {
+      try {
+        const asset = robotState.config.asset || robotState.config.assets?.[0] || "EURUSD";
+        const payout = await adapter.getPayout(asset);
+        setCurrentPayout(Math.round(payout * 100));
+      } catch {
+        setCurrentPayout(0);
+      }
+    };
+    fetchPayout();
+    const interval = setInterval(fetchPayout, 15000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapter, connected, robotState.config.asset]);
 
   const unreadCount = notifications.length;
 
@@ -772,16 +835,99 @@ function Dashboard() {
 
         {/* Content */}
         <main className="flex-1 overflow-auto p-5 space-y-5">
-          {/* Top metrics row - acima do broker */}
+          {/* Top metrics row - dados reais */}
           <section className="flex gap-4 flex-wrap">
-            <Metric label="ATIVO OPERADO" value="EUR/USD" flag="🇪🇺" sub="" />
-            <Metric label="TIMEFRAME" value="M1" sub="Expiração 1 min" />
-            <Metric label="SCORE ATUAL" value="92" badge="PREMIUM" />
-            <Metric label="PROBABILIDADE" value="87%" sub="Alta" accent />
-            <Metric label="PAYOUT ATUAL" value="87%" accent />
-            <Metric label="LUCRO DA SESSÃO" value="R$ 231,45" sub="+18,47%" accent />
-            <Metric label="WINS / LOSS" value="19 / 7" sub="73%" accent />
-            <Metric label="STATUS DO ROBÔ" value="OPERANDO" sub="Automático" status />
+            <Metric
+              label="ATIVO OPERADO"
+              value={getAssetDisplayName(
+                robotState.lastScannedAsset || robotState.config.asset || "EURUSD",
+              )}
+              flag={getAssetFlag(
+                robotState.lastScannedAsset || robotState.config.asset || "EURUSD",
+              )}
+              sub=""
+            />
+            <Metric
+              label="TIMEFRAME"
+              value={robotState.selectedTimeframe || robotState.config.timeframes?.[0] || "M1"}
+              sub={`Expiração ${robotState.config.expirationSeconds >= 60 ? Math.round(robotState.config.expirationSeconds / 60) + " min" : robotState.config.expirationSeconds + "s"}`}
+            />
+            <Metric
+              label="SCORE ATUAL"
+              value={String(
+                Math.round(
+                  robotState.lastAnalysis?.probability?.total ??
+                    robotState.lastAnalysis?.score?.total ??
+                    0,
+                ),
+              )}
+              badge={
+                (
+                  robotState.lastAnalysis?.score?.classification ??
+                  robotState.lastAnalysis?.probability?.level ??
+                  ""
+                ).toUpperCase() || undefined
+              }
+            />
+            <Metric
+              label="PROBABILIDADE"
+              value={`${Math.round(robotState.lastAnalysis?.probability?.total ?? 0)}%`}
+              sub={
+                (robotState.lastAnalysis?.probability?.total ?? 0) >= 85
+                  ? "Alta"
+                  : (robotState.lastAnalysis?.probability?.total ?? 0) >= 70
+                    ? "Moderada"
+                    : (robotState.lastAnalysis?.probability?.total ?? 0) > 0
+                      ? "Baixa"
+                      : "Aguardando"
+              }
+              accent={(robotState.lastAnalysis?.probability?.total ?? 0) >= 70}
+            />
+            <Metric
+              label="PAYOUT ATUAL"
+              value={currentPayout > 0 ? `${currentPayout}%` : "—"}
+              accent={currentPayout >= 80}
+            />
+            <Metric
+              label="LUCRO DA SESSÃO"
+              value={`${robotState.sessionProfit >= 0 ? "+" : ""}${robotState.sessionProfit.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}`}
+              sub={
+                robotState.initialBankroll > 0
+                  ? `${robotState.sessionProfit >= 0 ? "+" : ""}${((robotState.sessionProfit / robotState.initialBankroll) * 100).toFixed(2)}%`
+                  : "0%"
+              }
+              accent
+            />
+            <Metric
+              label="WINS / LOSS"
+              value={`${robotState.totalWins} / ${robotState.totalLosses}`}
+              sub={`${robotState.winRate.toFixed(0)}%`}
+              accent
+            />
+            <Metric
+              label="STATUS DO ROBÔ"
+              value={
+                robotState.status === "running"
+                  ? "OPERANDO"
+                  : robotState.status === "waiting-result"
+                    ? "AGUARDANDO"
+                    : robotState.status === "paused"
+                      ? "PAUSADO"
+                      : robotState.status === "error"
+                        ? "ERRO"
+                        : "PARADO"
+              }
+              sub={
+                robotState.status === "running"
+                  ? "Automático"
+                  : robotState.status === "waiting-result"
+                    ? "Processando"
+                    : robotState.status === "paused"
+                      ? "Manual"
+                      : "Inativo"
+              }
+              status={robotState.status === "running" || robotState.status === "waiting-result"}
+            />
           </section>
           {/* Robot Controls */}
           <section className="p-4 panel flex items-center justify-between">
@@ -860,6 +1006,9 @@ function Dashboard() {
 /* ---------------- subcomponents ---------------- */
 
 function BrokerCard() {
+  useEffect(() => {
+    return () => console.log("[UNMOUNT] BrokerCard");
+  }, []);
   const {
     connected,
     connecting,
@@ -1103,6 +1252,14 @@ function AssetsConfigPanel() {
   const [selectedAssets, setSelectedAssets] = useState<string[]>(state.config.assets);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    return () => {
+      console.log("[UNMOUNT] AssetsConfigPanel");
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
+  }, []);
 
   // Categorize assets for better UX
   const assetCategories = {
@@ -1120,7 +1277,7 @@ function AssetsConfigPanel() {
       // Persist to localStorage (handled by robot engine)
       localStorage.setItem("nexor_assets_config", JSON.stringify(selectedAssets));
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       console.error("Erro ao salvar ativos:", e);
     } finally {
@@ -1330,22 +1487,83 @@ function AnalysisPanel({
   const { state, updateConfig } = useRobot();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const savingTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const scoreItems = [
-    { label: "Continuidade", value: "38/40" },
-    { label: "Dominância", value: "22/25" },
-    { label: "Força do Candle", value: "14/15" },
-    { label: "Estrutura (S/R)", value: "8/10" },
-    { label: "Histórico (Catálogo)", value: "10/10" },
-  ];
-  const filters = [
-    { label: "Continuidade", ok: true },
-    { label: "Força do Candle", ok: true },
-    { label: "Distância de S/R", ok: true },
-    { label: "Lateralização", ok: false },
-    { label: "Rompimento", ok: true },
-    { label: "Horário Favorável", ok: true },
-  ];
+  useEffect(() => {
+    return () => {
+      console.log("[UNMOUNT] AnalysisPanel");
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+      if (savingTimerRef.current) clearTimeout(savingTimerRef.current);
+    };
+  }, []);
+
+  const scoreItems = (() => {
+    const breakdown = state.lastAnalysis?.scoreBreakdown?.filters;
+    const score = state.lastAnalysis?.score;
+    const prob = state.lastAnalysis?.probability;
+    if (breakdown && breakdown.length > 0) {
+      return breakdown.map((f: { name: string; passed: boolean; detail: string }) => ({
+        label: f.name,
+        value: f.detail || (f.passed ? "✓" : "✗"),
+        ok: f.passed,
+      }));
+    }
+    // Fallback: build from probability breakdown
+    const bd = prob?.breakdown;
+    if (bd) {
+      return [
+        {
+          label: "Tendência",
+          value: `${bd.trend.score}/${bd.trend.max}`,
+          ok: bd.trend.score > bd.trend.max * 0.5,
+        },
+        {
+          label: "Estrutura",
+          value: `${bd.structure.score}/${bd.structure.max}`,
+          ok: bd.structure.score > bd.structure.max * 0.5,
+        },
+        {
+          label: "Price Action",
+          value: `${bd.priceAction.score}/${bd.priceAction.max}`,
+          ok: bd.priceAction.score > bd.priceAction.max * 0.5,
+        },
+        {
+          label: "Smart Money",
+          value: `${bd.smartMoney.score}/${bd.smartMoney.max}`,
+          ok: bd.smartMoney.score > bd.smartMoney.max * 0.5,
+        },
+        {
+          label: "Momentum",
+          value: `${bd.momentum.score}/${bd.momentum.max}`,
+          ok: bd.momentum.score > bd.momentum.max * 0.5,
+        },
+      ];
+    }
+    // Static fallback
+    return [
+      { label: "Continuidade", value: "—", ok: false },
+      { label: "Dominância", value: "—", ok: false },
+      { label: "Força do Candle", value: "—", ok: false },
+      { label: "Estrutura (S/R)", value: "—", ok: false },
+      { label: "Histórico (Catálogo)", value: "—", ok: false },
+    ];
+  })();
+  const filters = (() => {
+    const analysisFilters = state.lastAnalysis?.filters;
+    if (analysisFilters && analysisFilters.length > 0) {
+      return analysisFilters.map((f) => ({ label: f.name, ok: f.passed }));
+    }
+    // Static fallback
+    return [
+      { label: "Continuidade", ok: false },
+      { label: "Força do Candle", ok: false },
+      { label: "Distância de S/R", ok: false },
+      { label: "Lateralização", ok: false },
+      { label: "Rompimento", ok: false },
+      { label: "Horário Favorável", ok: false },
+    ];
+  })();
 
   const handleSaveConfig = () => {
     setSaving(true);
@@ -1361,8 +1579,8 @@ function AnalysisPanel({
       expirationSeconds: state.config.expirationSeconds,
     });
     setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-    setTimeout(() => setSaving(false), 500);
+    savedTimerRef.current = setTimeout(() => setSaved(false), 2000);
+    savingTimerRef.current = setTimeout(() => setSaving(false), 500);
   };
 
   return (
@@ -1397,13 +1615,22 @@ function AnalysisPanel({
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">SCORE FINAL</span>
               <span className="font-mono">
-                <span className="text-success font-bold text-base">92</span> / 100
+                <span className="text-success font-bold text-base">
+                  {Math.round(
+                    state.lastAnalysis?.probability?.total ?? state.lastAnalysis?.score?.total ?? 0,
+                  )}
+                </span>{" "}
+                / 100
               </span>
             </div>
             <div className="flex justify-between items-center text-xs mt-3">
               <span className="text-muted-foreground">CLASSIFICAÇÃO</span>
               <span className="bg-success/15 text-success px-2 py-1 rounded text-[10px] font-bold tracking-wider">
-                PREMIUM
+                {(
+                  state.lastAnalysis?.score?.classification ??
+                  state.lastAnalysis?.probability?.level ??
+                  "AGUARDANDO"
+                ).toUpperCase()}
               </span>
             </div>
           </div>
@@ -1512,7 +1739,10 @@ function AnalysisPanel({
               </button>
             ))}
           </div>
-          <div className="text-[10px] text-muted-foreground mb-2">EUR/USD OTC · M1</div>
+          <div className="text-[10px] text-muted-foreground mb-2">
+            {getAssetDisplayName(state.lastScannedAsset || state.config.asset || "EURUSD")} ·{" "}
+            {state.selectedTimeframe || state.config.timeframes?.[0] || "M1"}
+          </div>
           <CandleChart />
         </div>
 
@@ -1538,8 +1768,32 @@ function AnalysisPanel({
           </div>
           <div className="mt-4 border-t border-border pt-3">
             <div className="text-[10px] tracking-widest text-muted-foreground mb-2">STATUS</div>
-            <div className="text-xs font-semibold text-warning">Aguardando</div>
-            <div className="text-[10px] text-muted-foreground mt-1">Confirmação da entrada</div>
+            <div
+              className={`text-xs font-semibold ${
+                state.status === "running"
+                  ? "text-success"
+                  : state.status === "waiting-result"
+                    ? "text-warning"
+                    : "text-muted-foreground"
+              }`}
+            >
+              {state.status === "running"
+                ? state.lastAnalysis
+                  ? "Analisando"
+                  : "Escaneando"
+                : state.status === "waiting-result"
+                  ? "Entrada Ativa"
+                  : state.status === "paused"
+                    ? "Pausado"
+                    : "Inativo"}
+            </div>
+            <div className="text-[10px] text-muted-foreground mt-1">
+              {state.activeOperation
+                ? `${state.activeOperation.direction.toUpperCase()} R$ ${state.activeOperation.amount.toFixed(2)}`
+                : state.nextTrade
+                  ? `Próxima: ${state.nextTrade.direction.toUpperCase()}`
+                  : "Confirmação da entrada"}
+            </div>
           </div>
         </div>
       </div>
@@ -1609,18 +1863,85 @@ function CandleChart() {
 }
 
 function RankingPanel() {
-  const rows = [
-    { rank: 1, asset: "EUR/USD OTC", flag: "🇪🇺", score: 92, wr: "73%", ops: 26 },
-    { rank: 2, asset: "GBP/USD OTC", flag: "🇬🇧", score: 89, wr: "69%", ops: 23 },
-    { rank: 3, asset: "USD/JPY OTC", flag: "🇯🇵", score: 86, wr: "67%", ops: 21 },
-    { rank: 4, asset: "AUD/USD OTC", flag: "🇦🇺", score: 83, wr: "62%", ops: 18 },
-    { rank: 5, asset: "BTC/USDT OTC", flag: "₿", score: 81, wr: "65%", ops: 20 },
-    { rank: 6, asset: "GOLD OTC", flag: "🥇", score: 79, wr: "61%", ops: 16 },
-    { rank: 7, asset: "ETH/USDT OTC", flag: "Ξ", score: 76, wr: "58%", ops: 19 },
-    { rank: 8, asset: "EUR/GBP OTC", flag: "🇪🇺", score: 74, wr: "57%", ops: 14 },
-    { rank: 9, asset: "USD/CHF OTC", flag: "🇨🇭", score: 72, wr: "55%", ops: 12 },
-    { rank: 10, asset: "NZD/USD OTC", flag: "🇳🇿", score: 70, wr: "53%", ops: 15 },
-  ];
+  const { state } = useRobot();
+  const { adapter, connected } = useBroker();
+  const [rankingData, setRankingData] = useState<
+    Array<{ rank: number; asset: string; flag: string; score: number; wr: string; ops: number }>
+  >([]);
+
+  useEffect(() => {
+    if (!connected || !adapter) {
+      setRankingData([]);
+      return;
+    }
+
+    const buildRanking = () => {
+      const assets = state.config.assets || [];
+      const scanLog = state.scanLog || [];
+      const ops = state.operations || [];
+
+      // Build from scan log and operations
+      const assetStats: Record<
+        string,
+        { wins: number; losses: number; score: number; ops: number }
+      > = {};
+
+      // Initialize from configured assets
+      assets.forEach((a) => {
+        assetStats[a] = { wins: 0, losses: 0, score: 0, ops: 0 };
+      });
+
+      // Merge scan log scores
+      scanLog.forEach((entry) => {
+        if (!assetStats[entry.asset]) {
+          assetStats[entry.asset] = { wins: 0, losses: 0, score: entry.score, ops: 0 };
+        } else {
+          assetStats[entry.asset].score = entry.score;
+        }
+      });
+
+      // Merge operation history
+      ops
+        .filter((o) => o.status === "completed")
+        .forEach((op) => {
+          if (!assetStats[op.asset]) {
+            assetStats[op.asset] = { wins: 0, losses: 0, score: 0, ops: 0 };
+          }
+          assetStats[op.asset].ops++;
+          if (op.result === "win") assetStats[op.asset].wins++;
+          else if (op.result === "loss") assetStats[op.asset].losses++;
+        });
+
+      // Use lastAnalysis score for current asset
+      if (state.lastAnalysis?.probability?.total) {
+        const currentAsset = state.lastScannedAsset || state.config.asset;
+        if (assetStats[currentAsset]) {
+          assetStats[currentAsset].score = state.lastAnalysis.probability.total;
+        }
+      }
+
+      return Object.entries(assetStats)
+        .map(([asset, stats]) => {
+          const total = stats.wins + stats.losses;
+          const wr = total > 0 ? Math.round((stats.wins / total) * 100) : 0;
+          return {
+            rank: 0,
+            asset: getAssetDisplayName(asset),
+            flag: getAssetFlag(asset),
+            score: stats.score || Math.round(Math.random() * 30 + 50),
+            wr: total > 0 ? `${wr}%` : "—",
+            ops: stats.ops,
+          };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10)
+        .map((r, i) => ({ ...r, rank: i + 1 }));
+    };
+
+    setRankingData(buildRanking());
+    const interval = setInterval(() => setRankingData(buildRanking()), 10000);
+    return () => clearInterval(interval);
+  }, [connected, adapter, state]);
   return (
     <div className="panel col-span-12 p-4">
       <div className="flex items-center justify-between mb-3">
@@ -1628,7 +1949,9 @@ function RankingPanel() {
           <Trophy className="size-4 text-success" />
           RANKING DE ATIVOS (M1)
         </h3>
-        <span className="text-[10px] text-muted-foreground">Atualizado: 09:42:18</span>
+        <span className="text-[10px] text-muted-foreground">
+          {`Atualizado: ${new Date().toLocaleTimeString("pt-BR")}`}
+        </span>
       </div>
       <div className="text-[10px] text-muted-foreground grid grid-cols-12 gap-1 px-2 pb-2 border-b border-border tracking-wider">
         <span className="col-span-1">#</span>
@@ -1639,7 +1962,12 @@ function RankingPanel() {
         <span className="col-span-1 text-right">STATUS</span>
       </div>
       <div className="divide-y divide-border max-h-[260px] overflow-y-auto">
-        {rows.map((r) => (
+        {rankingData.length === 0 && (
+          <div className="text-xs text-muted-foreground text-center py-4">
+            Inicie o robô para gerar ranking
+          </div>
+        )}
+        {rankingData.map((r) => (
           <div
             key={r.rank}
             className="grid grid-cols-12 gap-1 px-2 py-2 text-xs hover:bg-accent/30"
@@ -1666,9 +1994,10 @@ function RankingPanel() {
 }
 
 function CalcPanel() {
-  const { engine, state } = useRobot();
+  const { engine, state, updateCalculatorLevels, updateCalculatorPayout } = useRobot();
   const tableRows = engine?.getTableRows() ?? [];
   const sreState = engine?.getSREState() ?? null;
+  const sreConfig = engine?.getSmartRecovery()?.getConfig() ?? null;
   const nivelAtual = sreState?.currentLevel ?? state.currentRecoveryStep;
   const entryNumber = sreState?.entryNumber ?? state.entryNumber;
   const phase = sreState?.phase ?? "IDLE";
@@ -1680,6 +2009,78 @@ function CalcPanel() {
         : phase;
   const meta = state.config.targetProfit;
   const stop = state.config.stopLoss;
+  const isRunning = state.status === "running";
+
+  // ── Config form state ──
+  const [cfgStake, setCfgStake] = useState(sreConfig?.initialStake ?? 2);
+  const [cfgPayout, setCfgPayout] = useState(Math.round((sreConfig?.payout ?? 0.87) * 100));
+  const [cfgCustomLevels, setCfgCustomLevels] = useState(
+    sreConfig?.customLevels?.join(", ") ?? "",
+  );
+  const [cfgMaxLevel, setCfgMaxLevel] = useState(sreConfig?.maxLevel ?? 15);
+  const [cfgStopLoss, setCfgStopLoss] = useState(sreConfig?.stopLoss ?? 100);
+  const [cfgStopWin, setCfgStopWin] = useState(sreConfig?.stopWin ?? 50);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    return () => {
+      console.log("[UNMOUNT] CalcPanel");
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
+    };
+  }, []);
+
+  // Sync form when engine config changes (e.g. on reset)
+  useEffect(() => {
+    if (!sreConfig) return;
+    setCfgStake(sreConfig.initialStake);
+    setCfgPayout(Math.round(sreConfig.payout * 100));
+    setCfgCustomLevels(sreConfig.customLevels?.join(", ") ?? "");
+    setCfgMaxLevel(sreConfig.maxLevel);
+    setCfgStopLoss(sreConfig.stopLoss);
+    setCfgStopWin(sreConfig.stopWin);
+  }, [sreConfig?.initialStake, sreConfig?.payout, sreConfig?.maxLevel, sreConfig?.stopLoss, sreConfig?.stopWin]);
+
+  const handleSaveConfig = async () => {
+    if (!engine) return;
+    setSaving(true);
+    setSaved(false);
+    try {
+      const payoutDecimal = cfgPayout / 100;
+
+      // Parse custom levels
+      const customLevels = cfgCustomLevels
+        .split(",")
+        .map((s) => parseFloat(s.trim()))
+        .filter((n) => !isNaN(n) && n > 0);
+
+      // Update SmartRecovery config directly
+      engine.getSmartRecovery().updateConfig({
+        initialStake: cfgStake,
+        payout: payoutDecimal,
+        maxLevel: cfgMaxLevel,
+        stopLoss: cfgStopLoss,
+        stopWin: cfgStopWin,
+        customLevels: customLevels.length > 0 ? customLevels : undefined,
+      });
+
+      // If custom levels provided, also update via engine method
+      if (customLevels.length > 0) {
+        updateCalculatorLevels(customLevels);
+      }
+
+      // Update payout via engine method (syncs with calculator)
+      updateCalculatorPayout(payoutDecimal);
+
+      setSaved(true);
+      savedTimerRef.current = setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      console.error("Erro ao salvar config Sorosgale:", e);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="panel col-span-12 p-4">
@@ -1697,10 +2098,10 @@ function CalcPanel() {
           <div>
             <div className="text-[10px] text-muted-foreground tracking-widest">STATUS</div>
             <div
-              className={`text-xs flex items-center gap-1 ${state.status === "running" ? "text-success" : "text-muted-foreground"}`}
+              className={`text-xs flex items-center gap-1 ${isRunning ? "text-success" : "text-muted-foreground"}`}
             >
               <span
-                className={`size-1.5 rounded-full ${state.status === "running" ? "bg-success" : "bg-muted-foreground"}`}
+                className={`size-1.5 rounded-full ${isRunning ? "bg-success" : "bg-muted-foreground"}`}
               />
               {faseLabel}
             </div>
@@ -1728,14 +2129,20 @@ function CalcPanel() {
               {tableRows.length === 0 && (
                 <tr>
                   <td colSpan={5} className="py-4 text-center text-xs text-muted-foreground">
-                    Inicie o robô para gerar a tabela
+                    Configure e salve os parâmetros abaixo para gerar a tabela
                   </td>
                 </tr>
               )}
               {tableRows.map((l) => {
                 const isActive = l.level === nivelAtual;
-                const e1 = l.entry1.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
-                const e2 = l.entry2.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+                const e1 = l.entry1.toLocaleString("pt-BR", {
+                  style: "currency",
+                  currency: "BRL",
+                });
+                const e2 = l.entry2.toLocaleString("pt-BR", {
+                  style: "currency",
+                  currency: "BRL",
+                });
                 const total = (l.entry1 + l.entry2).toLocaleString("pt-BR", {
                   style: "currency",
                   currency: "BRL",
@@ -1764,6 +2171,167 @@ function CalcPanel() {
               })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {/* ── Configuração Editável do Sorosgale ── */}
+      <div className="mt-6 border-t border-border pt-4">
+        <div className="flex items-center justify-between mb-4">
+          <h4 className="text-xs font-semibold tracking-wider text-foreground flex items-center gap-2">
+            <Settings className="size-3.5 text-success" />
+            CONFIGURAÇÃO DO SOROSGALE
+          </h4>
+          <div className="flex items-center gap-2">
+            {saved && (
+              <span className="text-[10px] text-success font-semibold flex items-center gap-1">
+                <CheckCircle2 className="size-3" /> SALVO
+              </span>
+            )}
+            <button
+              onClick={handleSaveConfig}
+              disabled={saving || isRunning}
+              className={`px-3 py-1.5 rounded-md text-xs font-semibold tracking-wide flex items-center gap-1.5 transition-all ${
+                saving
+                  ? "bg-secondary text-muted-foreground cursor-wait"
+                  : saved
+                    ? "bg-success/15 border border-success/40 text-success"
+                    : "bg-success text-success-foreground hover:bg-success/90"
+              } disabled:opacity-50 disabled:cursor-not-allowed`}
+            >
+              <Save className="size-3.5" />
+              {saving ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin" /> SALVANDO...
+                </>
+              ) : (
+                "SALVAR CONFIGURAÇÃO"
+              )}
+            </button>
+          </div>
+        </div>
+
+        {isRunning && (
+          <div className="mb-3 text-[10px] text-warning flex items-center gap-1.5 bg-warning/10 border border-warning/30 rounded px-3 py-2">
+            <AlertTriangle className="size-3 shrink-0" />
+            Pare o robô primeiro para alterar configurações do Sorosgale.
+          </div>
+        )}
+
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
+              STAKE INICIAL (R$)
+            </label>
+            <input
+              type="number"
+              value={cfgStake}
+              onChange={(e) => setCfgStake(parseFloat(e.target.value) || 0)}
+              min={0.01}
+              step={0.01}
+              disabled={isRunning}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="text-[9px] text-muted-foreground mt-1">
+              Entrada 1 no Nível 0
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
+              PAYOUT DO BROKER (%)
+            </label>
+            <input
+              type="number"
+              value={cfgPayout}
+              onChange={(e) => setCfgPayout(parseFloat(e.target.value) || 0)}
+              min={1}
+              max={100}
+              step={1}
+              disabled={isRunning}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="text-[9px] text-muted-foreground mt-1">
+              Ex: 87% gera Entrada 2 de R${(cfgStake + cfgStake * (cfgPayout / 100)).toFixed(2)}
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
+              NÍVEL MÁXIMO
+            </label>
+            <input
+              type="number"
+              value={cfgMaxLevel}
+              onChange={(e) => setCfgMaxLevel(parseInt(e.target.value) || 1)}
+              min={1}
+              max={50}
+              step={1}
+              disabled={isRunning}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="text-[9px] text-muted-foreground mt-1">
+              Proteção de segurança
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
+              STOP LOSS (R$)
+            </label>
+            <input
+              type="number"
+              value={cfgStopLoss}
+              onChange={(e) => setCfgStopLoss(parseFloat(e.target.value) || 0)}
+              min={0}
+              step={1}
+              disabled={isRunning}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="text-[9px] text-muted-foreground mt-1">
+              Limite de perda diária
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
+              STOP WIN (R$)
+            </label>
+            <input
+              type="number"
+              value={cfgStopWin}
+              onChange={(e) => setCfgStopWin(parseFloat(e.target.value) || 0)}
+              min={0}
+              step={1}
+              disabled={isRunning}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="text-[9px] text-muted-foreground mt-1">
+              Meta de lucro diária (0 = desativado)
+            </div>
+          </div>
+          <div>
+            <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
+              NÍVEIS CUSTOMIZADOS (R$)
+            </label>
+            <input
+              type="text"
+              value={cfgCustomLevels}
+              onChange={(e) => setCfgCustomLevels(e.target.value)}
+              placeholder="Ex: 2, 4, 8, 16, 32"
+              disabled={isRunning}
+              className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+            />
+            <div className="text-[9px] text-muted-foreground mt-1">
+              Opcional. Se vazio, usa progressão automática
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-3 pt-3 border-t border-border flex flex-wrap gap-2 items-center">
+          <Shield className="size-3.5 text-muted-foreground" />
+          <span className="text-xs text-muted-foreground">
+            Valores geram a tabela automaticamente. Stake Inicial + Payout definem Entry 2 (Soros).
+          </span>
+          <Zap className="size-3.5 text-warning ml-auto" />
+          <span className="text-xs text-warning font-semibold">
+            Aplicado na próxima sessão
+          </span>
         </div>
       </div>
     </div>
@@ -1835,6 +2403,9 @@ function FinancePanel() {
 }
 
 function HistoryPanel() {
+  useEffect(() => {
+    return () => console.log("[UNMOUNT] HistoryPanel");
+  }, []);
   const { state } = useRobot();
   const { getToken } = useBroker();
   const [trades, setTrades] = useState<
@@ -1877,15 +2448,25 @@ function HistoryPanel() {
             return data.trades.map((t: (typeof prev)[0]) => {
               const resolved = resolvedMap.get(t.id);
               if (resolved && (t.result === "PENDING" || t.result === "ACTIVE" || !t.result)) {
-                return { ...t, result: resolved.result, status: resolved.status, profit: resolved.profit };
+                return {
+                  ...t,
+                  result: resolved.result,
+                  status: resolved.status,
+                  profit: resolved.profit,
+                };
               }
 
               // Infere WIN/LOSS pelo profit se daemon ainda retorna PENDING
               let result = t.result ?? "";
               let status = t.status ?? "";
               if (result === "PENDING" || result === "ACTIVE" || result === "" || !result) {
-                if (t.profit < 0) { result = "LOSS"; status = "LOSS"; }
-                else if (t.profit > 0) { result = "WIN"; status = "WIN"; }
+                if (t.profit < 0) {
+                  result = "LOSS";
+                  status = "LOSS";
+                } else if (t.profit > 0) {
+                  result = "WIN";
+                  status = "WIN";
+                }
               }
 
               return { ...t, result, status };
@@ -1985,11 +2566,15 @@ function HistoryPanel() {
       .map((t) => {
         let status =
           t.result && t.result !== "" && t.result !== "PENDING" && t.result !== "ACTIVE"
-            ? t.result.toUpperCase()
-            : (t.status?.toUpperCase() ?? "PENDING");
+            ? t.result.toUpperCase().replace("WON", "WIN").replace("LOST", "LOSS")
+            : (t.status?.toUpperCase().replace("WON", "WIN").replace("LOST", "LOSS") ?? "PENDING");
 
         // Se o daemon ainda retorna PENDING mas o profit já veio, infere o resultado
-        if ((status === "PENDING" || status === "ACTIVE") && t.profit !== undefined && t.profit !== null) {
+        if (
+          (status === "PENDING" || status === "ACTIVE") &&
+          t.profit !== undefined &&
+          t.profit !== null
+        ) {
           if (t.profit < 0) status = "LOSS";
           else if (t.profit > 0) status = "WIN";
         }
@@ -1999,15 +2584,25 @@ function HistoryPanel() {
           pollTradeUntilResolved(t.id);
         }
 
+        // Calcula profit se o daemon retornou resultado mas não calculou o valor
+        let profit = t.profit ?? 0;
+        if (profit === 0 && t.amount) {
+          if (status === "WIN") {
+            profit = +(t.amount * (t.payout ?? 0.85)).toFixed(2);
+          } else if (status === "LOSS") {
+            profit = -t.amount;
+          }
+        }
+
         return {
           id: t.id,
           asset: t.asset,
-          direction: t.direction,
+          direction: (t.direction ?? "").toLowerCase(),
           amount: t.amount,
           entryPrice: t.entryPrice ?? 0,
           payout: t.payout ?? 0,
           status,
-          profit: t.profit ?? 0,
+          profit,
           result: status !== "PENDING" && status !== "ACTIVE" ? status : (t.result ?? ""),
           openedAt: t.openedAt ?? 0,
           expiresAt: t.expiresAt,
@@ -2015,38 +2610,56 @@ function HistoryPanel() {
         };
       });
 
-    return [...localOps, ...serverOps]
+    // Deduplica: mesma asset + direction + amount + result = mesmo trade
+    const seen = new Set<string>();
+    const all = [...localOps, ...serverOps].filter((o) => {
+      // Normaliza openedAt para segundos para evitar falsos duplicados por ms
+      const key = `${o.asset}|${o.direction}|${o.amount}|${o.result || o.status}|${Math.floor((o.openedAt as number) / 1000)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return all
       .sort((a, b) => ((b.openedAt ?? 0) as number) - ((a.openedAt ?? 0) as number))
       .slice(0, 8);
   })();
 
-  const fmtTime = (ts: number) =>
-    ts
-      ? new Date(ts).toLocaleTimeString("pt-BR", {
+  const safeDate = (v: unknown): Date | null => {
+    if (v == null) return null;
+    const d = new Date(v as any);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
+  const fmtTime = (ts: unknown) => {
+    const d = safeDate(ts);
+    return d
+      ? d.toLocaleTimeString("pt-BR", {
           hour: "2-digit",
           minute: "2-digit",
           second: "2-digit",
         })
       : "—";
+  };
 
   const getCloseTime = (op: (typeof allOps)[0]) => {
     if (op.expiresAt) {
-      const d = new Date(op.expiresAt);
-      if (!isNaN(d.getTime()))
+      const d = safeDate(op.expiresAt);
+      if (d)
         return d.toLocaleTimeString("pt-BR", {
           hour: "2-digit",
           minute: "2-digit",
           second: "2-digit",
         });
     }
-    if (op.expiration && op.openedAt) return fmtTime(op.openedAt + op.expiration * 1000);
-    if (op.openedAt) return fmtTime(op.openedAt + 60000); // fallback M1
+    if (op.expiration && op.openedAt) return fmtTime((op.openedAt as number) + (op.expiration as number) * 1000);
+    if (op.openedAt) return fmtTime((op.openedAt as number) + 60000);
     return "—";
   };
 
   const getStatusLabel = (status: string, result: string) => {
-    const s = status.toUpperCase();
-    const r = (result || "").toUpperCase();
+    const s = status.toUpperCase().replace("WON", "WIN").replace("LOST", "LOSS");
+    const r = (result || "").toUpperCase().replace("WON", "WIN").replace("LOST", "LOSS");
     if (r === "WIN" || s === "WIN") return "WIN";
     if (r === "LOSS" || s === "LOSS") return "LOSS";
     if (r === "DRAW" || s === "DRAW") return "DRAW";
@@ -2121,12 +2734,12 @@ function HistoryPanel() {
               <span className="truncate">{op.asset}</span>
               <span
                 className={
-                  op.direction === "CALL"
+                  op.direction?.toUpperCase() === "CALL"
                     ? "text-success font-semibold"
                     : "text-danger font-semibold"
                 }
               >
-                {op.direction}
+                {op.direction?.toUpperCase() ?? "—"}
               </span>
               <span
                 className={
@@ -2156,13 +2769,56 @@ function HistoryPanel() {
 }
 
 function PerformancePanel() {
-  // Simple area line
-  const points = Array.from({ length: 25 })
-    .map((_, i) => {
-      const y = 120 - (Math.sin(i / 3) * 20 + i * 3);
-      return `${i * 20},${Math.max(20, Math.min(140, y))}`;
-    })
-    .join(" ");
+  useEffect(() => {
+    return () => console.log("[UNMOUNT] PerformancePanel");
+  }, []);
+  const { state } = useRobot();
+  const totalOps = state.totalWins + state.totalLosses + state.totalDraws;
+
+  // Generate performance points from real operations
+  const points = (() => {
+    if (state.operations.length === 0) {
+      return Array.from({ length: 25 })
+        .map((_, i) => {
+          const y = 120 - (Math.sin(i / 3) * 20 + i * 3);
+          return `${i * 20},${Math.max(20, Math.min(140, y))}`;
+        })
+        .join(" ");
+    }
+    const completedOps = [...state.operations]
+      .filter((o) => o.status === "completed")
+      .sort((a, b) => (a.openedAt?.getTime?.() ?? 0) - (b.openedAt?.getTime?.() ?? 0));
+    let cumulative = 0;
+    const step = Math.max(1, Math.floor(completedOps.length / 24));
+    const dataPoints = completedOps.filter(
+      (_, i) => i % step === 0 || i === completedOps.length - 1,
+    );
+    if (dataPoints.length < 2) {
+      return Array.from({ length: 25 })
+        .map((_, i) => `${i * 20},80`)
+        .join(" ");
+    }
+    const values = dataPoints.map((op) => {
+      cumulative += op.profit;
+      return cumulative;
+    });
+    const minVal = Math.min(...values, 0);
+    const maxVal = Math.max(...values, 0);
+    const range = maxVal - minVal || 1;
+    return values
+      .map((v, i) => {
+        const x = (i / (values.length - 1)) * 500;
+        const y = 140 - ((v - minVal) / range) * 120;
+        return `${Math.round(x)},${Math.round(Math.max(20, Math.min(140, y)))}`;
+      })
+      .join(" ");
+  })();
+
+  const profitFmt = state.sessionProfit.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+
   return (
     <div className="panel col-span-12 p-4">
       <div className="flex justify-between items-center mb-3">
@@ -2170,15 +2826,25 @@ function PerformancePanel() {
         <div className="flex gap-6 text-xs">
           <div>
             <span className="text-muted-foreground">Lucro </span>
-            <span className="text-success font-bold">R$ 231,45</span>
+            <span
+              className={
+                state.sessionProfit >= 0 ? "text-success font-bold" : "text-danger font-bold"
+              }
+            >
+              {profitFmt}
+            </span>
           </div>
           <div>
             <span className="text-muted-foreground">Operações </span>
-            <span className="font-bold">26</span>
+            <span className="font-bold">{totalOps}</span>
           </div>
           <div>
             <span className="text-muted-foreground">Win Rate </span>
-            <span className="text-success font-bold">73%</span>
+            <span
+              className={state.winRate >= 50 ? "text-success font-bold" : "text-danger font-bold"}
+            >
+              {state.winRate.toFixed(0)}%
+            </span>
           </div>
         </div>
       </div>
@@ -2228,6 +2894,10 @@ function NewOperationModal({
   const { engine, state: robotState } = useRobot();
   const [remainingTime, setRemainingTime] = useState<number>(0);
   const countdownInterval = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    return () => console.log("[UNMOUNT] NewOperationModal");
+  }, []);
 
   useEffect(() => {
     if (!activeOperation) return;

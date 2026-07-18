@@ -235,7 +235,8 @@ export class PumaSocketClient {
   }
 
   disconnect(): void {
-    console.log(`[PumaSocketClient #${this.instanceId}] disconnect()`);
+    const stack = new Error().stack?.split("\n").slice(2, 5).join(" | ") ?? "";
+    console.log(`[PumaSocketClient #${this.instanceId}] disconnect() called from:`, stack);
     this._clearJwtRenewal();
     this._tradesSocket?.disconnect();
     this._otcSocket?.disconnect();
@@ -518,7 +519,9 @@ export class PumaSocketClient {
     if (!data) return;
 
     const tradeId = String(data.id ?? "");
-    const status = String(data.status ?? "ACTIVE");
+    // Extrai status de trade.status, ou status (ordem de prioridade conforme payload real da Puma)
+    const tradeObj = data.trade as Record<string, unknown> | undefined;
+    const status = String(tradeObj?.status ?? data.status ?? "ACTIVE");
 
     console.log("╔═══════════════════════════════════════════════════════════════╗");
     console.log("║  📊  tradeUpdate RECEBIDO                                    ║");
@@ -527,7 +530,7 @@ export class PumaSocketClient {
     console.log("║  symbol:", String(data.symbol ?? "").padEnd(52), "║");
     console.log("╚═══════════════════════════════════════════════════════════════╝");
     console.log("[DEBUG-TRADE] 📊 tradeUpdate RAW payload:", JSON.stringify(data, null, 2));
-    console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol });
+    console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol, tradeStatus: data.trade?.status });
 
     engineLogger.info("PumaSocketClient", "📊 tradeUpdate recebido", {
       tradeId,
@@ -551,7 +554,9 @@ export class PumaSocketClient {
     if (!data) return;
 
     const tradeId = String(data.id ?? data.tradeId ?? data.orderId ?? "");
-    const status = String(data.status ?? data.result ?? "UNKNOWN");
+    // Extrai status de trade.status, result, ou status (ordem de prioridade conforme payload real da Puma)
+    const tradeObj = data.trade as Record<string, unknown> | undefined;
+    const status = String(tradeObj?.status ?? data.result ?? data.status ?? "UNKNOWN");
     const profit = Number(data.profit ?? data.pnl ?? 0);
 
     if (!tradeId) return;

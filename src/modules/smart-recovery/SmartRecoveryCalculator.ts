@@ -33,10 +33,12 @@ export class SmartRecoveryCalculator {
 
       if (hasCustomLevels && level < cfg.customLevels!.length) {
         entry1 = cfg.customLevels![level];
-      } else if (level <= 2) {
+      } else if (level <= 0) {
         entry1 = cfg.initialStake;
       } else {
-        entry1 = parseFloat((accLossBefore / 2).toFixed(2));
+        const recovery = accLossBefore / 2;
+        const minStake = parseFloat((cfg.initialStake * (1 + level * 0.3)).toFixed(2));
+        entry1 = parseFloat(Math.max(recovery, minStake).toFixed(2));
       }
 
       const profit1 = parseFloat((entry1 * cfg.payout).toFixed(2));

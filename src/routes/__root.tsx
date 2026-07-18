@@ -7,13 +7,57 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, type ReactNode, Component } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { BrokerProvider } from "../hooks/useBroker";
 import { RobotProvider } from "../hooks/useRobot";
 import { connectLoggerToDaemon } from "../engine/logger";
+
+/**
+ * React Error Boundary — catches render errors locally so they don't cascade
+ * to TanStack Router's errorComponent (which unmounts the whole app tree).
+ */
+class ErrorBoundary extends Component<
+  { children: ReactNode; onError?: (error: Error) => void },
+  { hasError: boolean }
+> {
+  constructor(props: { children: ReactNode; onError?: (error: Error) => void }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, info: { componentStack?: string }) {
+    console.error("[REACT ERROR]", error, info.componentStack ?? "");
+    this.props.onError?.(error);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-background px-4">
+          <div className="max-w-md text-center">
+            <h1 className="text-xl font-semibold tracking-tight text-foreground">
+              Unexpected error
+            </h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              The UI caught an error but will continue running. Check the console for details.
+            </p>
+            <button
+              onClick={() => this.setState({ hasError: false })}
+              className="mt-4 inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function NotFoundComponent() {
   return (
@@ -39,7 +83,7 @@ function NotFoundComponent() {
 
 function ErrorComponent({ error, reset }: { error: Error | null; reset: () => void }) {
   if (error) {
-    console.error(error);
+    console.error("[REACT ROUTER ERROR] error:", error, "stack:", error.stack);
     const router = useRouter();
     useEffect(() => {
       reportLovableError(error, { boundary: "tanstack_root_error_component" });
@@ -152,12 +196,20 @@ function RootComponent() {
     return disconnect;
   }, []);
 
+  useEffect(() => {
+    return () => {
+      console.log("[UNMOUNT] RootComponent");
+    };
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrokerProvider>
         <RobotProvider>
-          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-          <Outlet />
+          <ErrorBoundary>
+            {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+            <Outlet />
+          </ErrorBoundary>
         </RobotProvider>
       </BrokerProvider>
     </QueryClientProvider>

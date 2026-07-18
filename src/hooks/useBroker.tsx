@@ -135,6 +135,7 @@ export function BrokerProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     return () => {
+      console.log("[SOCKET DISCONNECT] useBroker unmount cleanup — adapter.disconnect()");
       adapterRef.current?.disconnect().catch(() => {});
     };
   }, []);

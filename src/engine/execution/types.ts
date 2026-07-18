@@ -1,4 +1,5 @@
 export interface NextTrade {
+  decisionId: number;
   symbol: string;
   direction: "call" | "put";
   score: number;
@@ -13,6 +14,7 @@ export interface NextTrade {
 
 export interface EntryRecord {
   tradeId: string;
+  decisionId: number;
   symbol: string;
   timeframe: string;
   candleOpenTime: number;

@@ -452,6 +452,17 @@ export class PumaBrokerAdapter implements IBroker {
         engineLogger.info("PumaBroker", "═══════════════════════════════════════════════════", {});
       },
       onCandleUpdate: (symbol, candle) => {
+        this._onPriceCallbacks.forEach((cb) => {
+          cb({
+            asset: symbol,
+            bid: candle.close,
+            ask: candle.close,
+            spread: 0,
+            timestamp: Date.now(),
+          });
+        });
+      },
+      onCandleClosed: (symbol, candle) => {
         this._onCandleCloseCallbacks.forEach((cb) => {
           try {
             cb(candle);
@@ -461,16 +472,6 @@ export class PumaBrokerAdapter implements IBroker {
               symbol,
             });
           }
-        });
-
-        this._onPriceCallbacks.forEach((cb) => {
-          cb({
-            asset: symbol,
-            bid: candle.close,
-            ask: candle.close,
-            spread: 0,
-            timestamp: Date.now(),
-          });
         });
       },
       onTick: (data: TickData) => {
@@ -485,10 +486,10 @@ export class PumaBrokerAdapter implements IBroker {
         });
       },
       onTradeUpdate: (data) => {
-        this.handleTradeUpdate({ id: data.id, status: data.status });
+        this.handleTradeUpdate(data);
       },
       onTradeResult: (data) => {
-        this.handleTradeResult({ id: data.id, status: data.status, profit: data.profit });
+        this.handleTradeResult(data);
       },
     });
 
@@ -547,7 +548,6 @@ export class PumaBrokerAdapter implements IBroker {
       assets: activeHybrids,
       interval: "1",
       debug: true,
-      useProxy: true,
       onCandle: (symbol, candle) => {
         // Alimenta o MarketDataService com os candles do WS2
         if (this._marketDataService) {
@@ -636,7 +636,7 @@ export class PumaBrokerAdapter implements IBroker {
 
     engineLogger.info("PumaBroker", `═══ WS2 CONECTANDO PARA HÍBRIDOS ═══`, {
       assets: activeHybrids.join(", "),
-      mode: this._ws2Client["_options"]?.useProxy ? "proxy" : "direto",
+      mode: "proxy",
       hasWs2Session: !!this._ws2Session,
       sessionPreview: tokenPreview,
     });
@@ -1067,6 +1067,26 @@ export class PumaBrokerAdapter implements IBroker {
     const payout = await this.getPayout(params.asset);
     const timeframe = params.timeframe ?? "M1";
 
+    const payload = {
+      asset: params.asset,
+      direction,
+      amount: params.amount,
+      expiration: params.expiration,
+      entryPrice: params.entryPrice ?? 0,
+      payout,
+      timeframe,
+      isDemo: this._isDemo,
+    };
+
+    const traceId = params.decidedAt ?? Date.now();
+    engineLogger.info("PumaBroker", "[AMOUNT TRACE] orderParams → payload", {
+      traceId,
+      amount: params.amount,
+      direction,
+      asset: params.asset,
+    });
+    console.log("[BROKER]", JSON.stringify({ ...payload, traceId }));
+
     let res: Response;
     try {
       res = await fetchWithRetry(`${DAEMON_URL}/trades`, {
@@ -1075,16 +1095,7 @@ export class PumaBrokerAdapter implements IBroker {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this._token}`,
         },
-        body: JSON.stringify({
-          asset: params.asset,
-          direction,
-          amount: params.amount,
-          expiration: params.expiration,
-          entryPrice: params.entryPrice ?? 0,
-          payout,
-          timeframe,
-          isDemo: this._isDemo,
-        }),
+        body: JSON.stringify(payload),
       });
     } catch {
       throw new Error(
@@ -1124,8 +1135,12 @@ export class PumaBrokerAdapter implements IBroker {
       );
     }
 
-    // Se o daemon retornar 404, significa que a Puma API não tem o resultado ainda
-    // — retorna ACTIVE para continuar polling (não travar a Promise)
+    // Daemon retorna 404 quando a trade não existe no SQLite (nunca foi criada ou já foi removida)
+    if (res.status === 404) {
+      console.warn(`[POLL] Trade não encontrada (404): ${orderId}`);
+      return "UNKNOWN";
+    }
+
     if (!res.ok) {
       console.log(
         `[DEBUG-TRADE] ⏱ getResult: HTTP ${res.status} para ordem ${orderId} — continuando polling (ACTIVE)`,
@@ -1134,6 +1149,10 @@ export class PumaBrokerAdapter implements IBroker {
     }
 
     const data = await res.json();
+    if (!data) {
+      console.warn(`[POLL] Resposta vazia para: ${orderId}`);
+      return "ACTIVE";
+    }
     return this._normalizeStatus(data.status ?? "ACTIVE");
   }
 
@@ -1236,9 +1255,10 @@ export class PumaBrokerAdapter implements IBroker {
     }
   }
 
-  handleTradeUpdate(data: { id: string; status: string }): void {
+  handleTradeUpdate(data: { id: string; status?: string; trade?: { status: string }; result?: string }): void {
+    const status = data.trade?.status ?? data.result ?? data.status ?? "";
     console.log(
-      `[DEBUG-TRADE] 📊 handleTradeUpdate RECEIVED: id=${data.id}, status=${data.status}, now=${Date.now()}`,
+      `[DEBUG-TRADE] 📊 handleTradeUpdate RECEIVED: id=${data.id}, status=${status}, rawStatus=${data.status}, tradeStatus=${data.trade?.status}, result=${data.result}, now=${Date.now()}`,
     );
     const pending = this._pendingTradeResults.get(data.id);
     if (pending) {
@@ -1249,8 +1269,8 @@ export class PumaBrokerAdapter implements IBroker {
       this._expiresAtMap.delete(data.id);
       this._pendingTradeResults.delete(data.id);
       if (this._pendingTradeResults.size === 0) this._stopPendingResultPoller();
-      const normalized = this._normalizeStatus(data.status);
-      console.log(`[DEBUG-TRADE] 📊 handleTradeUpdate: normalized ${data.status} -> ${normalized}`);
+      const normalized = this._normalizeStatus(status);
+      console.log(`[DEBUG-TRADE] 📊 handleTradeUpdate: normalized ${status} -> ${normalized}`);
       pending.resolve(normalized);
     } else {
       console.log(
@@ -1259,12 +1279,18 @@ export class PumaBrokerAdapter implements IBroker {
     }
   }
 
-  handleTradeResult(data: { id: string; status: string; profit: number }): void {
+  handleTradeResult(data: { id: string; status?: string; profit: number; trade?: { status: string }; result?: string }): void {
+    const status = data.trade?.status ?? data.result ?? data.status ?? "";
+    console.log("[TRADE RESULT RECEBIDO]", {
+      tradeId: data.id,
+      rawStatus: status,
+      profit: data.profit,
+    });
     console.log(
-      `[DEBUG-TRADE] 🏁 handleTradeResult RECEIVED: id=${data.id}, status=${data.status}, profit=${data.profit}`,
+      `[DEBUG-TRADE] 🏁 handleTradeResult RECEIVED: id=${data.id}, status=${status}, rawStatus=${data.status}, tradeStatus=${data.trade?.status}, result=${data.result}, profit=${data.profit}`,
     );
     const pending = this._pendingTradeResults.get(data.id);
-    const normalized = this._normalizeStatus(data.status);
+    const normalized = this._normalizeStatus(status);
     if (pending) {
       console.log(
         `[DEBUG-TRADE] 🏁 handleTradeResult: PENDING FOUND, resolving with ${normalized}`,
@@ -1278,12 +1304,9 @@ export class PumaBrokerAdapter implements IBroker {
       console.log(
         `[DEBUG-TRADE] ⚠️ handleTradeResult: NO PENDING for ${data.id} — resolving anyway`,
       );
-      // Still resolve any future waiters with the result
-      // (if waitForTradeResult was called after the trade was already closed)
     }
-    // Also update any cached trade state if needed
     console.log(
-      `[DEBUG-TRADE] 🏁 handleTradeResult: final status ${data.status} -> ${normalized}, profit: ${data.profit}`,
+      `[DEBUG-TRADE] 🏁 handleTradeResult: final status ${status} -> ${normalized}, profit: ${data.profit}`,
     );
   }
 
@@ -1327,19 +1350,29 @@ export class PumaBrokerAdapter implements IBroker {
 
   /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
-  private _normalizeStatus(raw: string): OrderStatus {
-    const upper = raw.toUpperCase();
-    if (
-      upper === "WIN" ||
-      upper === "LOSS" ||
-      upper === "DRAW" ||
-      upper === "ACTIVE" ||
-      upper === "EXPIRED" ||
-      upper === "CANCELED"
-    ) {
-      return upper as OrderStatus;
+  private _normalizeStatus(raw?: string): OrderStatus {
+    const upper = (raw ?? "").trim().toUpperCase();
+    switch (upper) {
+      case "WON":
+      case "WIN":
+        return "WIN";
+      case "LOST":
+      case "LOSS":
+        return "LOSS";
+      case "DRAW":
+        return "DRAW";
+      case "ACTIVE":
+      case "PENDING":
+        return "ACTIVE";
+      case "EXPIRED":
+        return "EXPIRED";
+      case "CANCELED":
+      case "CANCELLED":
+        return "CANCELED";
+      default:
+        console.warn("[PUMA] Status desconhecido:", raw);
+        return "EXPIRED";
     }
-    return "ACTIVE";
   }
 
   private _expirationToTimeframe(seconds: number): string {

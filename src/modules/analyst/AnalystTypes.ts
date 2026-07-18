@@ -57,6 +57,8 @@ export type AnalystEventType =
   | "diary.entry"
   | "market.update"
   | "scanLog.update"
+  | "ai.decision"
+  | "ai.blocked-entry"
   | "system.info";
 
 export type AnalystMessageLevel = "success" | "info" | "warning" | "error";

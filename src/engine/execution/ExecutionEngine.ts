@@ -45,6 +45,7 @@ export class ExecutionEngine {
 
   private _records: EntryRecord[] = [];
   private _maxRecords = 200;
+  private _statsLogCounter = 0;
 
   constructor(broker: PumaBrokerAdapter) {
     this._broker = broker;
@@ -225,7 +226,26 @@ export class ExecutionEngine {
         expiration: trade.expiration,
         entryPrice: trade.entryPrice,
         timeframe: trade.timeframe,
+        decidedAt: trade.decidedAt,
       };
+
+      console.log("[EXECUTION]", {
+        traceId: trade.decidedAt,
+        asset: trade.symbol,
+        direction: trade.direction,
+        amount: trade.amount,
+        expiration: trade.expiration,
+        entryPrice: trade.entryPrice,
+        timeframe: trade.timeframe,
+        candleOpen: new Date(candleTime).toISOString(),
+        decisionDelay,
+      });
+      engineLogger.info("ExecutionEngine", "[AMOUNT TRACE] nextTrade → orderParams", {
+        traceId: trade.decidedAt,
+        amount: trade.amount,
+        direction: trade.direction,
+        symbol: trade.symbol,
+      });
 
       latencyTracker.mark("order_sent_proxy", "Order Sent to Proxy", {
         symbol: trade.symbol,
@@ -244,6 +264,7 @@ export class ExecutionEngine {
 
       const record: EntryRecord = {
         tradeId: orderResult.orderId,
+        decisionId: trade.decisionId,
         symbol: trade.symbol,
         timeframe: trade.timeframe,
         candleOpenTime: candleTime,
@@ -261,8 +282,44 @@ export class ExecutionEngine {
       if (this._records.length > this._maxRecords) {
         this._records.shift();
       }
+      this._logLatencyStats();
 
+      const decisionCandle = Math.floor(trade.decidedAt / 60000) * 60000;
+      const expectedExecutionCandle = decisionCandle + 60000;
+      const actualExecutionCandle = candleTime;
+      const sameCandle = expectedExecutionCandle === actualExecutionCandle;
+      const candleOpenTimeStr = new Date(candleTime).toISOString();
+      const sendTimeStr = new Date(sendTime).toISOString();
+
+      console.log("[ORDER CREATED]", {
+        decisionId: trade.decisionId,
+        tradeId: record.tradeId,
+        decidedAt: trade.decidedAt,
+        symbol: trade.symbol,
+        amount: trade.amount,
+        direction: trade.direction,
+        level: (trade as any).level,
+        entry: (trade as any).entry,
+        totalLatency: `${totalLatency}ms`,
+      });
+      console.log("[DECISION EXECUTED]", {
+        decisionId: trade.decisionId,
+        tradeId: record.tradeId,
+        direction: trade.direction,
+        amount: trade.amount,
+        decidedAt: new Date(trade.decidedAt).toISOString(),
+        expectedExecutionCandle: new Date(expectedExecutionCandle).toISOString(),
+        actualExecutionCandle: new Date(actualExecutionCandle).toISOString(),
+        sameCandle,
+        expectedOpen: candleOpenTimeStr,
+        actualOpen: sendTimeStr,
+        clockDrift: `${sendTime - candleTime}ms`,
+        decisionAge: `${decisionDelay}ms`,
+        brokerLatency: `${executionDelay}ms`,
+        totalLatency: `${totalLatency}ms`,
+      });
       engineLogger.info("ExecutionEngine", `═══ ORDEM EXECUTADA ═══`, {
+        decisionId: trade.decisionId,
         tradeId: record.tradeId,
         totalLatency: `${totalLatency}ms`,
         decisionDelay: `${decisionDelay}ms`,
@@ -288,5 +345,40 @@ export class ExecutionEngine {
 
     this._phase = "monitoring";
     this._callbacks?.onPhaseChange?.(this._phase);
+  }
+
+  private _logLatencyStats(): void {
+    this._statsLogCounter++;
+    if (this._statsLogCounter % 10 !== 0) return;
+
+    const recs = this._records;
+    if (recs.length === 0) return;
+
+    let sumClockDrift = 0;
+    let sumBroker = 0;
+    let sumTotal = 0;
+    let worstTotal = 0;
+    let maxDecisionAge = 0;
+    let count = 0;
+
+    for (const r of recs) {
+      const drift = r.sendTime - r.candleOpenTime;
+      const decisionAge = r.sendTime - r.decisionTime;
+      sumClockDrift += drift;
+      sumBroker += r.brokerDelay;
+      sumTotal += r.totalLatency;
+      if (r.totalLatency > worstTotal) worstTotal = r.totalLatency;
+      if (decisionAge > maxDecisionAge) maxDecisionAge = decisionAge;
+      count++;
+    }
+
+    console.log("[LATENCY STATS]", {
+      operations: count,
+      averageClockDrift: `${Math.round(sumClockDrift / count)}ms`,
+      averageBrokerLatency: `${Math.round(sumBroker / count)}ms`,
+      averageTotalLatency: `${Math.round(sumTotal / count)}ms`,
+      worstTotalLatency: `${worstTotal}ms`,
+      maxDecisionAge: `${maxDecisionAge}ms`,
+    });
   }
 }

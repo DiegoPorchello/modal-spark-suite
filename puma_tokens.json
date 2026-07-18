@@ -1,0 +1,9 @@
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMxNjU0IiwiZW1haWwiOiJmZXJuYW5kYWxvcGVzdG9ycmVzMUBnbWFpbC5jb20iLCJqdGkiOiJmNWQyNzM4MS1lMWQ2LTRiZmEtODA3YS1hZjg1YTIyNTkxODgiLCJ0eXAiOiJhY2Nlc3MiLCJhdWQiOiJ0cmFkZSIsImZpZCI6ImU1NzhmYzdmLTExZGUtNDA2Yi05NTZhLTcyOTI4MzIwMTY3ZSIsImlhdCI6MTc4NDM0MzI0MywiZXhwIjoxNzg0MzQ0MTQzfQ.tkHpKWOqEcr10nz7bjrjiwF7y0TI0oHG7cFGuu6XlP4",
+  "refresh_token": "EnwVWIN4Yu0vub2Uwn3Br1kb2v4Lm31CX1rR-KjkFpY",
+  "user_id": "31654",
+  "email": "fernandalopestorres1@gmail.com",
+  "expires_at": 1784344143,
+  "issued_at": 1784343243,
+  "updated_at": "2026-07-18T02:54:04.766555+00:00"
+}

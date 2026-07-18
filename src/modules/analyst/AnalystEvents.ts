@@ -440,6 +440,18 @@ export const ANALYST_EVENT_MAP: Record<AnalystEventType, AnalystEventDef> = {
     },
     icon: "📋",
   },
+  "ai.decision": {
+    level: "info",
+    mode: "developer",
+    text: (m) => `IA decidiu: ${String(m?.action ?? "")} — ${String(m?.reason ?? "")}`,
+    icon: "🤖",
+  },
+  "ai.blocked-entry": {
+    level: "warning",
+    mode: "developer",
+    text: (m) => `IA bloqueou entrada: ${String(m?.action ?? "")} — ${String(m?.reason ?? "")}`,
+    icon: "⛔",
+  },
   "system.info": {
     level: "info",
     mode: "developer",

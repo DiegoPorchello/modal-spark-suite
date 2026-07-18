@@ -11,6 +11,7 @@ import type {
 } from "./SmartRecoveryTypes";
 import { DEFAULT_SOROS_CONFIG } from "./SmartRecoveryTypes";
 import { SmartRecoveryCalculator } from "./SmartRecoveryCalculator";
+import { SmartRecoveryHistory } from "./SmartRecoveryHistory";
 
 const sreLogger = {
   info: (msg: string, data?: Record<string, unknown>) =>
@@ -35,11 +36,13 @@ export class SmartRecoveryEngine {
   private calculator: SmartRecoveryCalculator;
   private listeners: SmartRecoveryListener[] = [];
   private operationCounter = 0;
+  private history: SmartRecoveryHistory;
 
   constructor(config?: Partial<SorosGaleConfig>) {
     this.config = { ...DEFAULT_SOROS_CONFIG, ...config };
     this.calculator = new SmartRecoveryCalculator(this.config);
     this.state = this.createInitialState();
+    this.history = new SmartRecoveryHistory();
   }
 
   on(listener: SmartRecoveryListener): () => void {
@@ -97,12 +100,39 @@ export class SmartRecoveryEngine {
     const stake = entry.valor;
     const profit = parseFloat((stake * p).toFixed(2));
     const cprBefore = this.state.capitalPending;
+    const currentEntry = this.state.entryNumber;
+    const currentLevel = this.state.currentLevel;
+    console.log(`[SR-DEBUG] registerWin chamado! levelAntes=${currentLevel} entry=${currentEntry} stake=R$${stake.toFixed(2)} profit=R$${profit.toFixed(2)}`);
+
+    if (currentEntry === 1) {
+      console.log("[SOROS STATE]", {
+        event: "WIN_ENTRY1",
+        previousLevel: currentLevel,
+        currentLevel: currentLevel,
+        previousEntry: 1,
+        currentEntry: 2,
+        previousStake: stake,
+        nextStake: this.getCurrentStake(),
+        capitalPending: this.state.capitalPending,
+      });
+    } else {
+      console.log("[SOROS STATE]", {
+        event: "WIN_ENTRY2",
+        previousLevel: currentLevel,
+        currentLevel: 0,
+        previousEntry: 2,
+        currentEntry: 1,
+        previousStake: stake,
+        nextStake: this.getCurrentStake(),
+        capitalPending: this.state.capitalPending,
+      });
+    }
 
     this.state.totalWins++;
     this.state.consecutiveWins++;
     this.state.consecutiveLosses = 0;
 
-    if (this.state.entryNumber === 1) {
+    if (currentEntry === 1) {
       // ── ENTRY 1 WON → vai para SOROS ──
       this.state.lastEntry1Profit = profit;
       this.state.entryNumber = 2;
@@ -115,13 +145,14 @@ export class SmartRecoveryEngine {
         `Entry 1 WIN: +R$ ${profit.toFixed(2)}. Partindo para SOROS.`,
       );
 
-      const op = this.buildOperation(direction, "WIN", stake, profit, cprBefore, cprBefore);
+      const op = this.buildOperation(direction, "WIN", stake, profit, cprBefore, cprBefore, currentEntry, currentLevel);
+      this.history.addOperation(op);
       this.operationCounter++;
       this.state.lastOperationTime = new Date();
       return op;
     }
 
-    // ── SOROS (ENTRY 2) WON → recuperação ──
+    // ── SOROS (ENTRY 2) WON → ciclo completo, reseta tudo ──
     const totalProfit = parseFloat((this.state.lastEntry1Profit + profit).toFixed(2));
     const cprAfter = Math.max(0, parseFloat((this.state.capitalPending - totalProfit).toFixed(2)));
 
@@ -129,28 +160,22 @@ export class SmartRecoveryEngine {
     this.state.sessionProfit = parseFloat((this.state.sessionProfit + totalProfit).toFixed(2));
     this.state.capitalPending = cprAfter;
     this.state.lastEntry1Profit = 0;
+
+    // ══ REGRA: Entry 2 WON → SEMPRE reseta nivel=0, entry=1 ══
+    this.state.currentLevel = 0;
     this.state.entryNumber = 1;
     this.state.phase = "WAIT";
 
-    if (cprAfter <= 0) {
-      this.state.currentLevel = 0;
-      this.emit(
-        "cpr.cleared",
-        undefined,
-        undefined,
-        `CPR zerado! Lucro total: R$ ${totalProfit.toFixed(2)}`,
-      );
-    } else {
-      this.emit(
-        "cpr.partial",
-        undefined,
-        undefined,
-        `CPR parcial: R$ ${cprAfter.toFixed(2)} restantes`,
-      );
-    }
+    this.emit(
+      "cpr.cleared",
+      undefined,
+      undefined,
+      `Ciclo completo! Lucro total: R$ ${totalProfit.toFixed(2)}. Resetado para Nivel 0, Entry 1.`,
+    );
 
-    const op = this.buildOperation(direction, "WIN", stake, profit, cprBefore, cprAfter);
+    const op = this.buildOperation(direction, "WIN", stake, profit, cprBefore, cprAfter, currentEntry, currentLevel);
     op.sessionProfit = parseFloat(this.state.sessionProfit.toFixed(2));
+    this.history.addOperation(op);
     this.operationCounter++;
     this.state.lastOperationTime = new Date();
 
@@ -158,7 +183,7 @@ export class SmartRecoveryEngine {
       "result.win",
       op,
       undefined,
-      `SOROS WIN! Lucro: +R$ ${profit.toFixed(2)}. Total ciclo: +R$ ${totalProfit.toFixed(2)}`,
+      `SOROS WIN! Lucro: +R$ ${profit.toFixed(2)}. Total ciclo: +R$ ${totalProfit.toFixed(2)}. Reset Nivel 0.`,
     );
     return op;
   }
@@ -167,12 +192,39 @@ export class SmartRecoveryEngine {
     const entry = this.getEntry();
     const stake = entry.valor;
     const cprBefore = this.state.capitalPending;
+    const currentEntry = this.state.entryNumber;
+    const currentLevel = this.state.currentLevel;
+    console.log(`[SR-DEBUG] registerLoss chamado! levelAntes=${currentLevel} entry=${currentEntry} stake=R$${stake.toFixed(2)}`);
+
+    if (currentEntry === 1) {
+      console.log("[SOROS STATE]", {
+        event: "LOSS_ENTRY1",
+        previousLevel: currentLevel,
+        currentLevel: this.state.currentLevel + 1,
+        previousEntry: 1,
+        currentEntry: 1,
+        previousStake: stake,
+        nextStake: this.getCurrentStake(),
+        capitalPending: this.state.capitalPending + stake,
+      });
+    } else {
+      console.log("[SOROS STATE]", {
+        event: "LOSS_ENTRY2",
+        previousLevel: currentLevel,
+        currentLevel: this.state.currentLevel + 1,
+        previousEntry: 2,
+        currentEntry: 1,
+        previousStake: stake,
+        nextStake: this.getCurrentStake(),
+        capitalPending: this.state.capitalPending,
+      });
+    }
 
     this.state.totalLosses++;
     this.state.consecutiveLosses++;
     this.state.consecutiveWins = 0;
 
-    if (this.state.entryNumber === 1) {
+    if (currentEntry === 1) {
       // ── ENTRY 1 LOSS → acumula prejuízo e sobe nível ──
       const cprAfter = parseFloat((this.state.capitalPending + stake).toFixed(2));
       this.state.dailyLoss = parseFloat((this.state.dailyLoss + stake).toFixed(2));
@@ -189,7 +241,8 @@ export class SmartRecoveryEngine {
         this.emit("risk.stop-loss");
       }
 
-      const op = this.buildOperation(direction, "LOSS", stake, -stake, cprBefore, cprAfter);
+      const op = this.buildOperation(direction, "LOSS", stake, -stake, cprBefore, cprAfter, currentEntry, currentLevel);
+      this.history.addOperation(op);
       this.operationCounter++;
       this.state.lastOperationTime = new Date();
 
@@ -214,7 +267,8 @@ export class SmartRecoveryEngine {
       this.emit("risk.stop-loss");
     }
 
-    const op = this.buildOperation(direction, "LOSS", stake, -stake, cprBefore, cprBefore);
+    const op = this.buildOperation(direction, "LOSS", stake, -stake, cprBefore, cprBefore, currentEntry, currentLevel);
+    this.history.addOperation(op);
     this.operationCounter++;
     this.state.lastOperationTime = new Date();
 
@@ -230,9 +284,22 @@ export class SmartRecoveryEngine {
   registerDraw(direction: "call" | "put"): SorosGaleOperation {
     const entry = this.getEntry();
     const stake = entry.valor;
+    console.log("[SOROS STATE]", {
+      event: "DRAW",
+      previousLevel: this.state.currentLevel,
+      currentLevel: this.state.currentLevel,
+      previousEntry: this.state.entryNumber,
+      currentEntry: this.state.entryNumber,
+      previousStake: stake,
+      nextStake: stake,
+      capitalPending: this.state.capitalPending,
+    });
     this.state.totalDraws++;
     const cprBefore = this.state.capitalPending;
-    const op = this.buildOperation(direction, "DRAW", stake, 0, cprBefore, cprBefore);
+    const currentEntry = this.state.entryNumber;
+    const currentLevel = this.state.currentLevel;
+    const op = this.buildOperation(direction, "DRAW", stake, 0, cprBefore, cprBefore, currentEntry, currentLevel);
+    this.history.addOperation(op);
     this.emit("result.draw", op, undefined, "Resultado indefinido (DRAW)");
     return op;
   }
@@ -324,16 +391,16 @@ export class SmartRecoveryEngine {
     }
 
     if (this.state.entryNumber === 2) {
-      const sorosStake = this.calculator.calculateEntry2(row.entry1);
-      sreLogger.info("getEntry → SOROS", {
-        valor: sorosStake,
+      sreLogger.info("getEntry → SOROS (Entry 2)", {
+        valor: row.entry2,
         level: this.state.currentLevel,
         entry: 2,
         capitalPending: this.state.capitalPending,
         rowEntry1: row.entry1,
+        rowEntry2: row.entry2,
       });
       return {
-        valor: sorosStake,
+        valor: row.entry2,
         level: this.state.currentLevel,
         entry: 2,
         isSoros: true,
@@ -368,7 +435,7 @@ export class SmartRecoveryEngine {
   // AI FINANCIAL AGENT
   // ═══════════════════════════════════════════════
 
-  evaluateAIDecision(): AIFinancialDecision {
+  evaluateAIDecision(history?: SmartRecoveryHistory): AIFinancialDecision {
     const decision: AIFinancialDecision = {
       action: "continue",
       reason: "",
@@ -376,23 +443,87 @@ export class SmartRecoveryEngine {
       timestamp: new Date(),
     };
 
+    const h = history ?? this.history;
+    const currentLevel = this.state.currentLevel;
+    const currentRow = this.calculator.getLevelRow(currentLevel, this.state.levelTable);
+
+    // 1. STOP LOSS
     if (this.state.isStopAtingido) {
       decision.action = "stop-session";
       decision.reason = `Stop loss atingido. Perda: R$ ${this.state.dailyLoss.toFixed(2)}`;
       decision.confidence = 100;
-    } else if (this.state.consecutiveLosses >= 5) {
+      return decision;
+    }
+
+    // 2. Consecutive losses >= 5
+    if (this.state.consecutiveLosses >= 5) {
       decision.action = "pause";
       decision.reason = `${this.state.consecutiveLosses} losses consecutivos. Pausando.`;
       decision.confidence = 90;
-    } else if (this.state.capitalPending > this.config.bankroll * 0.3) {
-      decision.action = "reduce-stake";
-      decision.reason = `CPR alto: R$ ${this.state.capitalPending.toFixed(2)}`;
-      decision.confidence = 75;
-    } else {
-      decision.reason = "Operando normalmente.";
-      decision.confidence = 60;
+      return decision;
     }
 
+    // 3. Nível sem recuperação matemática (canRecover = false)
+    if (currentRow && !currentRow.canRecover) {
+      decision.action = "reduce-stake";
+      decision.reason = `Nível ${currentLevel} não permite recuperação matemática (profit1+profit2 < accLoss).`;
+      decision.confidence = 80;
+      return decision;
+    }
+
+    // 4. Oscilação de nível (ex: L0→L1→L0→L1 repetidamente)
+    if (h.isLevelOscillating(currentLevel, 3)) {
+      decision.action = "pause";
+      decision.reason = `Oscilação detectada no nível ${currentLevel} (${h.getLevelCycleCount().get(currentLevel) ?? 0} visitas). Mercado lateral?`;
+      decision.confidence = 85;
+      return decision;
+    }
+
+    // 5. Win rate baixo no nível atual
+    const winRateAtLevel = h.getWinRateAtLevel(currentLevel);
+    if (winRateAtLevel > 0 && winRateAtLevel < 30) {
+      decision.action = "pause";
+      decision.reason = `Win rate de ${winRateAtLevel}% no nível ${currentLevel} (${h.getOperationsAtLevel(currentLevel).length} ops). Nível problemático.`;
+      decision.confidence = 80;
+      return decision;
+    }
+
+    // 6. CPR alto (> 30% da banca)
+    if (this.state.capitalPending > this.config.bankroll * 0.3) {
+      decision.action = "reduce-stake";
+      decision.reason = `CPR alto: R$ ${this.state.capitalPending.toFixed(2)} (${((this.state.capitalPending / this.config.bankroll) * 100).toFixed(1)}% da banca).`;
+      decision.confidence = 75;
+      return decision;
+    }
+
+    // 7. Padrão alternado (WIN→LOSS→WIN→LOSS) nos últimos 4 resultados no nível
+    const last4 = h.getLastResultsAtLevel(currentLevel, 4);
+    if (last4.length === 4) {
+      const alternating =
+        last4[0] !== last4[1] && last4[1] !== last4[2] && last4[2] !== last4[3];
+      if (alternating) {
+        decision.action = "adjust-recovery";
+        decision.reason = `Padrão alternado nos últimos 4 resultados do nível ${currentLevel}. Mercado sem tendência clara.`;
+        decision.confidence = 70;
+        return decision;
+      }
+    }
+
+    // 8. Multiple Soros failures
+    const sorosOps = h.getOperations().filter((op) => op.entryNumber === 2 && op.result === "LOSS");
+    if (sorosOps.length >= 3) {
+      const recentSoros = sorosOps.slice(-3);
+      if (recentSoros.every((op) => op.result === "LOSS")) {
+        decision.action = "pause";
+        decision.reason = `${sorosOps.length} Soros losses consecutivos. Estratégia de recuperação ineficaz.`;
+        decision.confidence = 85;
+        return decision;
+      }
+    }
+
+    // 9. Tudo OK — operar normalmente
+    decision.reason = "Operando normalmente.";
+    decision.confidence = 60;
     return decision;
   }
 
@@ -467,6 +598,10 @@ export class SmartRecoveryEngine {
   // PRIVATE
   // ═══════════════════════════════════════════════
 
+  getHistory(): SmartRecoveryHistory {
+    return this.history;
+  }
+
   private buildOperation(
     direction: "call" | "put",
     result: OperationOutcome,
@@ -474,6 +609,8 @@ export class SmartRecoveryEngine {
     profit: number,
     cprBefore: number,
     cprAfter: number,
+    currentEntry: 1 | 2,
+    currentLevel: number,
   ): SorosGaleOperation {
     return {
       id: `op-${Date.now()}-${this.operationCounter}`,
@@ -488,8 +625,8 @@ export class SmartRecoveryEngine {
       result,
       profit: parseFloat(profit.toFixed(2)),
       sessionProfit: parseFloat(this.state.sessionProfit.toFixed(2)),
-      entryNumber: this.state.entryNumber,
-      level: this.state.currentLevel,
+      entryNumber: currentEntry,
+      level: currentLevel,
     };
   }
 

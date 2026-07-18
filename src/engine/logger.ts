@@ -72,6 +72,8 @@ export class Logger {
     } else {
       console.log(prefix, message, data ?? "");
     }
+    // File transport (Node.js apenas)
+    _appendToLogFile(entry);
   }
 
   getLogs(level?: LogLevel, module?: string, limit = 100): LogEntry[] {
@@ -98,6 +100,19 @@ export class Logger {
 }
 
 export const engineLogger = new Logger();
+
+// File transport — grava logs em JSONL para debug fora do Electron/console
+const LOG_FILE = "C:\\Users\\Windows 10Pro\\Desktop\\Puma V2\\modal-spark-suite\\engine_logs.jsonl";
+
+async function _appendToLogFile(entry: LogEntry): Promise<void> {
+  if (typeof window !== "undefined") return;
+  try {
+    const fs = await import("fs");
+    fs.appendFileSync(LOG_FILE, JSON.stringify(entry) + "\n", "utf-8");
+  } catch {
+    // disco cheio, permissão, etc — silencioso
+  }
+}
 
 /**
  * Conecta o engineLogger ao proxy daemon para enviar logs via HTTP.
