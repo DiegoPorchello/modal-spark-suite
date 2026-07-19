@@ -26,6 +26,7 @@ import {
   VolumeX,
   BarChart3,
   TrendingUpIcon,
+  Star,
 } from "lucide-react";
 import { useState, useEffect, useRef, useCallback } from "react";
 import type {
@@ -38,6 +39,7 @@ import type {
 } from "./AnalystTypes";
 import { ANALYST_AI_STATE_CONFIG, ANALYST_MODE_CONFIG, SCORE_BAND_CONFIG } from "./AnalystTypes";
 import type { AnalystStore } from "./AnalystStore";
+import type { PerformanceContext } from "../performance/types/performance-context.types";
 import { AnalystTimeline } from "./AnalystTimeline";
 import { DiagnosticPanel } from "./DiagnosticPanel";
 import type { RobotState } from "../../engine/flow-robot-engine";
@@ -284,6 +286,18 @@ export function AnalystPanel({
 
           {/* 6. SCORE BREAKDOWN (filtros) */}
           {scoreBreakdown && <ScoreBreakdownPanel scoreBreakdown={scoreBreakdown} />}
+
+          {/* 6b. DECISION CONTEXT */}
+          {store.decisionContext && <DecisionContextPanelInline context={store.decisionContext} />}
+
+          {/* 6c. OPERATION CONTEXT */}
+          {store.operationContext && <OperationContextPanelInline context={store.operationContext} />}
+
+          {/* 6d. REPLAY TIMELINE */}
+          {store.replayContext && <ReplayTimelinePanelInline context={store.replayContext} />}
+
+          {/* 6e. PERFORMANCE INSIGHTS */}
+          {store.performanceContext && <PerformanceInsightsInline context={store.performanceContext} />}
 
           {/* 3. PENSAMENTO DA IA */}
           <AIThinkingPanel
@@ -837,6 +851,284 @@ function MiniInfo({ label, value }: { label: string; value: string }) {
     <div className="p-1.5 rounded bg-secondary/30">
       <div className="text-[8px] text-muted-foreground">{label}</div>
       <div className="text-[10px] font-bold capitalize">{value}</div>
+    </div>
+  );
+}
+
+function DecisionContextPanelInline({ context }: { context: import("../flow-continuity/types/decision-context.types").DecisionContext }) {
+  const DECISION_COLORS: Record<string, string> = {
+    CALL: "text-emerald-400",
+    PUT: "text-red-400",
+    WAIT: "text-amber-400",
+    REJECT: "text-zinc-400",
+  };
+  const DECISION_BG: Record<string, string> = {
+    CALL: "bg-emerald-500/10",
+    PUT: "bg-red-500/10",
+    WAIT: "bg-amber-500/10",
+    REJECT: "bg-zinc-500/10",
+  };
+  const confPct = Math.round(context.confidence * 100);
+  const confLabel = confPct >= 80 ? "High" : confPct >= 50 ? "Medium" : "Low";
+  const confColor = confPct >= 80 ? "text-emerald-400" : confPct >= 50 ? "text-amber-400" : "text-zinc-400";
+
+  return (
+    <div className="px-4 py-3 border-b border-border">
+      <div className="text-[10px] tracking-widest text-muted-foreground mb-2">DECISION CONTEXT</div>
+      <div className={`rounded p-2 mb-2 ${DECISION_BG[context.decision]}`}>
+        <div className="flex items-center justify-between">
+          <span className={`text-xs font-bold ${DECISION_COLORS[context.decision]}`}>{context.decision}</span>
+          <span className="text-[10px] text-muted-foreground">Score {context.finalScore}/{context.minimumScore}</span>
+        </div>
+        <div className="text-[10px] text-foreground/70 mt-1">{context.decisionReason}</div>
+      </div>
+      <div className="flex items-center justify-between text-[10px] mb-2">
+        <span className="text-muted-foreground">Confidence</span>
+        <span className={confColor}>{confLabel} ({confPct}%)</span>
+      </div>
+      <div className="grid grid-cols-3 gap-1 mb-2">
+        <div className="bg-secondary/40 rounded p-1 text-center">
+          <div className="text-[8px] text-muted-foreground">TREND</div>
+          <div className="text-[10px] font-medium">{context.trend}</div>
+        </div>
+        <div className="bg-secondary/40 rounded p-1 text-center">
+          <div className="text-[8px] text-muted-foreground">VOL</div>
+          <div className="text-[10px] font-medium">{context.volatility}</div>
+        </div>
+        <div className="bg-secondary/40 rounded p-1 text-center">
+          <div className="text-[8px] text-muted-foreground">BIAS</div>
+          <div className="text-[10px] font-medium">{context.bias}</div>
+        </div>
+      </div>
+      {context.approvedFilters.length > 0 && (
+        <div className="bg-emerald-500/5 rounded p-1.5 mb-1">
+          <div className="text-[9px] text-emerald-400 font-semibold mb-0.5">APPROVED ({context.approvedFilters.length})</div>
+          {context.approvedFilters.map((f) => (
+            <div key={f.id} className="text-[9px] text-foreground/70">
+              {f.name}: <span className="text-emerald-400">{f.contribution}/{f.weight}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {context.rejectedFilters.length > 0 && (
+        <div className="bg-red-500/5 rounded p-1.5 mb-1">
+          <div className="text-[9px] text-red-400 font-semibold mb-0.5">REJECTED ({context.rejectedFilters.length})</div>
+          {context.rejectedFilters.map((f) => (
+            <div key={f.id} className="text-[9px] text-foreground/70">
+              {f.name}: <span className="text-red-400">{f.contribution}/{f.weight}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="bg-secondary/40 rounded p-1.5 text-[10px]">
+        <span className="text-muted-foreground">TRIGGER: </span>
+        <span className="font-medium">{context.executionTrigger}</span>
+      </div>
+    </div>
+  );
+}
+
+function OperationContextPanelInline({ context }: { context: import("../flow-continuity/types/operation-context.types").OperationContext }) {
+  const STATUS_COLORS: Record<string, string> = {
+    WIN: "text-emerald-400",
+    LOSS: "text-red-400",
+    DRAW: "text-amber-400",
+    CANCELLED: "text-zinc-400",
+    PENDING: "text-blue-400",
+    OPEN: "text-blue-400",
+  };
+  const STATUS_BG: Record<string, string> = {
+    WIN: "bg-emerald-500/10",
+    LOSS: "bg-red-500/10",
+    DRAW: "bg-amber-500/10",
+    CANCELLED: "bg-zinc-500/10",
+    PENDING: "bg-blue-500/10",
+    OPEN: "bg-blue-500/10",
+  };
+  const profitColor = context.profit > 0 ? "text-emerald-400" : context.profit < 0 ? "text-red-400" : "text-zinc-400";
+  const profitSign = context.profit > 0 ? "+" : "";
+
+  return (
+    <div className="px-4 py-3 border-b border-border">
+      <div className="text-[10px] tracking-widest text-muted-foreground mb-2">LAST OPERATION</div>
+      <div className={`rounded p-2 mb-2 ${STATUS_BG[context.status]}`}>
+        <div className="flex items-center justify-between">
+          <span className={`text-xs font-bold ${STATUS_COLORS[context.status]}`}>{context.status}</span>
+          <span className="text-[10px] text-muted-foreground">{context.direction} {context.asset}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-1.5 text-[10px]">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Entry</span>
+            <span className="font-medium">{context.entryPrice.toFixed(5)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Exit</span>
+            <span className="font-medium">{context.exitPrice > 0 ? context.exitPrice.toFixed(5) : "—"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Amount</span>
+            <span className="font-medium">R$ {context.amount.toFixed(2)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Profit</span>
+            <span className={`font-bold ${profitColor}`}>{profitSign}{context.profit.toFixed(2)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Time</span>
+            <span className="font-medium">{context.expiration}s</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Latency</span>
+            <span className="font-medium">{context.executionLatency}ms</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Score</span>
+            <span className="font-medium">{context.score}/100</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Source</span>
+            <span className="font-medium">{context.executionSource}</span>
+          </div>
+        </div>
+      </div>
+      <div className="bg-secondary/40 rounded p-1.5 text-[10px]">
+        <span className="text-muted-foreground">REASON: </span>
+        <span className="font-medium">{context.executionReason}</span>
+      </div>
+    </div>
+  );
+}
+
+function ReplayTimelinePanelInline({ context }: { context: import("../flow-continuity/types/replay-context.types").ReplayContext }) {
+  const RESULT_COLORS: Record<string, string> = {
+    WIN: "text-emerald-400",
+    LOSS: "text-red-400",
+    BREAKEVEN: "text-amber-400",
+    TIMEOUT: "text-zinc-400",
+  };
+  const RESULT_BG: Record<string, string> = {
+    WIN: "bg-emerald-500/10",
+    LOSS: "bg-red-500/10",
+    BREAKEVEN: "bg-amber-500/10",
+    TIMEOUT: "bg-zinc-500/10",
+  };
+  const profitColor = context.profit > 0 ? "text-emerald-400" : context.profit < 0 ? "text-red-400" : "text-zinc-400";
+  const profitSign = context.profit > 0 ? "+" : "";
+  const durationSec = (context.durationMs / 1000).toFixed(0);
+  const timeStr = new Date(context.operationStartTime).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  const STEP_ICONS: Record<string, string> = {
+    "market.classified": "📊",
+    "strategy.selected": "⚙️",
+    "score.calculated": "🎯",
+    "filters.approved": "✅",
+    "decision.made": "⚖️",
+    "order.sent": "📤",
+    "broker.confirmed": "🏦",
+    "trade.opened": "📈",
+    "trade.closed": "🏁",
+  };
+
+  return (
+    <div className="px-4 py-3 border-b border-border">
+      <div className="text-[10px] tracking-widest text-muted-foreground mb-2">REPLAY TIMELINE</div>
+      <div className={`rounded p-2 mb-2 ${RESULT_BG[context.result]}`}>
+        <div className="flex items-center justify-between">
+          <span className={`text-xs font-bold ${RESULT_COLORS[context.result]}`}>{context.result}</span>
+          <span className="text-[10px] text-muted-foreground">{timeStr} — {durationSec}s</span>
+        </div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-1.5 text-[10px]">
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Ativo</span>
+            <span className="font-medium">{context.decisionContext.asset}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Score</span>
+            <span className="font-medium">{context.operationContext.score}/100</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Estratégia</span>
+            <span className="font-medium">{context.decisionContext.strategyName}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Lucro</span>
+            <span className={`font-bold ${profitColor}`}>{profitSign}R$ {context.profit.toFixed(2)}</span>
+          </div>
+        </div>
+      </div>
+      {/* Timeline */}
+      <div className="space-y-0">
+        {context.timeline.map((event, i) => {
+          const isLast = i === context.timeline.length - 1;
+          return (
+            <div key={event.stepIndex} className="flex items-start gap-2">
+              <div className="flex flex-col items-center">
+                <span className="text-xs">{STEP_ICONS[event.step] || "📌"}</span>
+                {!isLast && <div className="w-px h-4 bg-border" />}
+              </div>
+              <div className={`pb-1.5 ${isLast ? "" : "border-b border-border/50"} flex-1`}>
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] font-semibold text-foreground/80">{event.label}</span>
+                  <span className="text-[8px] text-muted-foreground/60 font-mono">
+                    {new Date(event.timestamp).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PerformanceInsightsInline({ context }: { context: PerformanceContext }) {
+  const SEVERITY_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
+    SUCCESS: { icon: <CheckCircle2 className="size-3 text-emerald-400" />, color: "text-emerald-400", bg: "bg-emerald-500/5" },
+    INFO: { icon: <Brain className="size-3 text-blue-400" />, color: "text-blue-400", bg: "bg-blue-500/5" },
+    WARNING: { icon: <AlertTriangle className="size-3 text-amber-400" />, color: "text-amber-400", bg: "bg-amber-500/5" },
+    DANGER: { icon: <AlertTriangle className="size-3 text-red-400" />, color: "text-red-400", bg: "bg-red-500/5" },
+  };
+
+  const health = context.robotHealth;
+
+  return (
+    <div className="px-4 py-3 border-b border-border">
+      <div className="flex items-center gap-1.5 mb-2">
+        <Star className="size-3 text-muted-foreground" />
+        <span className="text-[9px] tracking-widest text-muted-foreground">PERFORMANCE INSIGHTS</span>
+      </div>
+
+      {/* Robot Health Score Mini */}
+      <div className={`p-2 rounded-lg mb-2 ${health.score >= 60 ? "bg-emerald-500/5 border border-emerald-500/20" : health.score >= 40 ? "bg-amber-500/5 border border-amber-500/20" : "bg-red-500/5 border border-red-500/20"}`}>
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] font-semibold text-muted-foreground">SAÚDE DO ROBÔ</span>
+          <span className={`text-sm font-extrabold ${health.color}`}>{health.score}/100</span>
+        </div>
+        <div className="text-[9px] mt-0.5">{health.label}</div>
+      </div>
+
+      {/* Top Insights */}
+      <div className="space-y-1.5 max-h-[180px] overflow-y-auto">
+        {context.insights.length === 0 ? (
+          <div className="text-[10px] text-muted-foreground text-center py-2">
+            Aguardando dados...
+          </div>
+        ) : (
+          context.insights.slice(0, 6).map((insight) => {
+            const config = SEVERITY_CONFIG[insight.severity] || SEVERITY_CONFIG.INFO;
+            return (
+              <div key={insight.id} className={`flex items-start gap-1.5 p-1.5 rounded ${config.bg}`}>
+                {config.icon}
+                <div className="flex-1 min-w-0">
+                  <div className={`text-[9px] font-bold ${config.color}`}>{insight.title}</div>
+                  <div className="text-[8px] text-foreground/60 truncate">{insight.description}</div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
     </div>
   );
 }

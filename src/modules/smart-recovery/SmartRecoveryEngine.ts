@@ -9,9 +9,18 @@ import type {
   AIFinancialDecision,
   OperationOutcome,
 } from "./SmartRecoveryTypes";
-import { DEFAULT_SOROS_CONFIG } from "./SmartRecoveryTypes";
 import { SmartRecoveryCalculator } from "./SmartRecoveryCalculator";
 import { SmartRecoveryHistory } from "./SmartRecoveryHistory";
+
+export interface SRConfigSource {
+  initialStake: number;
+  payout: number;
+  maxLevel: number;
+  stopLoss: number;
+  targetProfit: number;
+  initialBankroll: number;
+  customLevels: number[];
+}
 
 const sreLogger = {
   info: (msg: string, data?: Record<string, unknown>) =>
@@ -31,16 +40,16 @@ export type SmartRecoveryListener = (event: {
 }) => void;
 
 export class SmartRecoveryEngine {
-  private config: SorosGaleConfig;
+  private configGetter: () => SRConfigSource;
   private state: SorosGaleState;
   private calculator: SmartRecoveryCalculator;
   private listeners: SmartRecoveryListener[] = [];
   private operationCounter = 0;
   private history: SmartRecoveryHistory;
 
-  constructor(config?: Partial<SorosGaleConfig>) {
-    this.config = { ...DEFAULT_SOROS_CONFIG, ...config };
-    this.calculator = new SmartRecoveryCalculator(this.config);
+  constructor(configGetter: () => SRConfigSource) {
+    this.configGetter = configGetter;
+    this.calculator = new SmartRecoveryCalculator();
     this.state = this.createInitialState();
     this.history = new SmartRecoveryHistory();
   }
@@ -68,9 +77,9 @@ export class SmartRecoveryEngine {
     });
   }
 
-  // ═══════════════════════════════════════════════
-  // PUBLIC API
-  // ═══════════════════════════════════════════════
+  private cfg(): SRConfigSource {
+    return this.configGetter();
+  }
 
   getCurrentStake(): number {
     return this.getEntry().valor;
@@ -78,54 +87,34 @@ export class SmartRecoveryEngine {
 
   getNextStake(): number {
     const entry = this.getEntry();
+    const c = this.cfg();
     if (entry.isSoros) {
-      // Se estamos em SOROS, a próxima entry1 seria do nível atual
       const row = this.calculator.getLevelRow(this.state.currentLevel, this.state.levelTable);
       return row.entry1;
     }
-    // Se estamos em ENTRY_1, a próxima entry seria SOROS se vencer
     if (this.state.entryNumber === 1) {
-      return this.calculator.calculateEntry2(entry.valor);
+      return this.calculator.calculateEntry2(entry.valor, c.payout);
     }
     return entry.valor;
   }
 
   canOperate(): boolean {
-    return this.calculator.canOperate(this.state);
+    const c = this.cfg();
+    return this.calculator.canOperate(this.state, c.stopLoss, c.targetProfit);
   }
 
   registerWin(direction: "call" | "put", payout?: number): SorosGaleOperation {
-    const p = payout ?? this.config.payout;
+    const c = this.cfg();
+    const p = payout ?? c.payout;
     const entry = this.getEntry();
     const stake = entry.valor;
-    const profit = parseFloat((stake * p).toFixed(2));
+    const profit = this.calculator.calculateProfit(stake, p);
     const cprBefore = this.state.capitalPending;
     const currentEntry = this.state.entryNumber;
     const currentLevel = this.state.currentLevel;
-    console.log(`[SR-DEBUG] registerWin chamado! levelAntes=${currentLevel} entry=${currentEntry} stake=R$${stake.toFixed(2)} profit=R$${profit.toFixed(2)}`);
 
     if (currentEntry === 1) {
-      console.log("[SOROS STATE]", {
-        event: "WIN_ENTRY1",
-        previousLevel: currentLevel,
-        currentLevel: currentLevel,
-        previousEntry: 1,
-        currentEntry: 2,
-        previousStake: stake,
-        nextStake: this.getCurrentStake(),
-        capitalPending: this.state.capitalPending,
-      });
     } else {
-      console.log("[SOROS STATE]", {
-        event: "WIN_ENTRY2",
-        previousLevel: currentLevel,
-        currentLevel: 0,
-        previousEntry: 2,
-        currentEntry: 1,
-        previousStake: stake,
-        nextStake: this.getCurrentStake(),
-        capitalPending: this.state.capitalPending,
-      });
     }
 
     this.state.totalWins++;
@@ -133,7 +122,6 @@ export class SmartRecoveryEngine {
     this.state.consecutiveLosses = 0;
 
     if (currentEntry === 1) {
-      // ── ENTRY 1 WON → vai para SOROS ──
       this.state.lastEntry1Profit = profit;
       this.state.entryNumber = 2;
       this.state.phase = "SOROS";
@@ -152,7 +140,6 @@ export class SmartRecoveryEngine {
       return op;
     }
 
-    // ── SOROS (ENTRY 2) WON → ciclo completo, reseta tudo ──
     const totalProfit = parseFloat((this.state.lastEntry1Profit + profit).toFixed(2));
     const cprAfter = Math.max(0, parseFloat((this.state.capitalPending - totalProfit).toFixed(2)));
 
@@ -161,7 +148,6 @@ export class SmartRecoveryEngine {
     this.state.capitalPending = cprAfter;
     this.state.lastEntry1Profit = 0;
 
-    // ══ REGRA: Entry 2 WON → SEMPRE reseta nivel=0, entry=1 ══
     this.state.currentLevel = 0;
     this.state.entryNumber = 1;
     this.state.phase = "WAIT";
@@ -189,43 +175,18 @@ export class SmartRecoveryEngine {
   }
 
   registerLoss(direction: "call" | "put"): SorosGaleOperation {
+    const c = this.cfg();
     const entry = this.getEntry();
     const stake = entry.valor;
     const cprBefore = this.state.capitalPending;
     const currentEntry = this.state.entryNumber;
     const currentLevel = this.state.currentLevel;
-    console.log(`[SR-DEBUG] registerLoss chamado! levelAntes=${currentLevel} entry=${currentEntry} stake=R$${stake.toFixed(2)}`);
-
-    if (currentEntry === 1) {
-      console.log("[SOROS STATE]", {
-        event: "LOSS_ENTRY1",
-        previousLevel: currentLevel,
-        currentLevel: this.state.currentLevel + 1,
-        previousEntry: 1,
-        currentEntry: 1,
-        previousStake: stake,
-        nextStake: this.getCurrentStake(),
-        capitalPending: this.state.capitalPending + stake,
-      });
-    } else {
-      console.log("[SOROS STATE]", {
-        event: "LOSS_ENTRY2",
-        previousLevel: currentLevel,
-        currentLevel: this.state.currentLevel + 1,
-        previousEntry: 2,
-        currentEntry: 1,
-        previousStake: stake,
-        nextStake: this.getCurrentStake(),
-        capitalPending: this.state.capitalPending,
-      });
-    }
 
     this.state.totalLosses++;
     this.state.consecutiveLosses++;
     this.state.consecutiveWins = 0;
 
     if (currentEntry === 1) {
-      // ── ENTRY 1 LOSS → acumula prejuízo e sobe nível ──
       const cprAfter = parseFloat((this.state.capitalPending + stake).toFixed(2));
       this.state.dailyLoss = parseFloat((this.state.dailyLoss + stake).toFixed(2));
       this.state.sessionProfit = parseFloat((this.state.sessionProfit - stake).toFixed(2));
@@ -235,7 +196,7 @@ export class SmartRecoveryEngine {
       this.state.entryNumber = 1;
       this.state.phase = "WAIT";
 
-      if (this.calculator.isStopLossAtingido(this.state.dailyLoss)) {
+      if (this.calculator.isStopLossAtingido(this.state.dailyLoss, c.stopLoss)) {
         this.state.phase = "STOP";
         this.state.isStopAtingido = true;
         this.emit("risk.stop-loss");
@@ -255,13 +216,12 @@ export class SmartRecoveryEngine {
       return op;
     }
 
-    // ── SOROS (ENTRY 2) LOSS → NÃO acumula prejuízo, só sobe nível ──
     this.state.lastEntry1Profit = 0;
     this.state.entryNumber = 1;
     this.state.currentLevel++;
     this.state.phase = "WAIT";
 
-    if (this.calculator.isStopLossAtingido(this.state.dailyLoss)) {
+    if (this.calculator.isStopLossAtingido(this.state.dailyLoss, c.stopLoss)) {
       this.state.phase = "STOP";
       this.state.isStopAtingido = true;
       this.emit("risk.stop-loss");
@@ -284,16 +244,6 @@ export class SmartRecoveryEngine {
   registerDraw(direction: "call" | "put"): SorosGaleOperation {
     const entry = this.getEntry();
     const stake = entry.valor;
-    console.log("[SOROS STATE]", {
-      event: "DRAW",
-      previousLevel: this.state.currentLevel,
-      currentLevel: this.state.currentLevel,
-      previousEntry: this.state.entryNumber,
-      currentEntry: this.state.entryNumber,
-      previousStake: stake,
-      nextStake: stake,
-      capitalPending: this.state.capitalPending,
-    });
     this.state.totalDraws++;
     const cprBefore = this.state.capitalPending;
     const currentEntry = this.state.entryNumber;
@@ -304,16 +254,21 @@ export class SmartRecoveryEngine {
     return op;
   }
 
-  // ═══════════════════════════════════════════════
-  // GETTERS
-  // ═══════════════════════════════════════════════
-
   getState(): SorosGaleState {
     return { ...this.state };
   }
 
   getConfig(): SorosGaleConfig {
-    return { ...this.config };
+    const c = this.cfg();
+    return {
+      bankroll: c.initialBankroll,
+      initialStake: c.initialStake,
+      payout: c.payout,
+      stopLoss: c.stopLoss,
+      stopWin: c.targetProfit,
+      maxLevel: c.maxLevel,
+      customLevels: c.customLevels.length > 0 ? c.customLevels : undefined,
+    };
   }
 
   getPhase(): SorosGalePhase {
@@ -321,26 +276,27 @@ export class SmartRecoveryEngine {
   }
 
   getDashboard(): SorosGaleDashboard {
+    const c = this.cfg();
     const entry = this.getEntry();
     const currentRow = this.calculator.getLevelRow(this.state.currentLevel, this.state.levelTable);
 
     return {
-      initialStake: this.config.initialStake,
-      bankroll: this.config.bankroll,
+      initialStake: c.initialStake,
+      bankroll: c.initialBankroll,
       sessionProfit: parseFloat(this.state.sessionProfit.toFixed(2)),
       capitalPending: parseFloat(this.state.capitalPending.toFixed(2)),
       currentStake: entry.valor,
       nextStake: this.getNextStake(),
-      payout: this.config.payout,
+      payout: c.payout,
       dailyLoss: parseFloat(this.state.dailyLoss.toFixed(2)),
       dailyProfit: parseFloat(this.state.dailyProfit.toFixed(2)),
-      stopLoss: this.config.stopLoss,
-      stopWin: this.config.stopWin,
+      stopLoss: c.stopLoss,
+      stopWin: c.targetProfit,
       stopLossRemaining: parseFloat(
-        Math.max(0, this.config.stopLoss - this.state.dailyLoss).toFixed(2),
+        Math.max(0, c.stopLoss - this.state.dailyLoss).toFixed(2),
       ),
       stopWinRemaining: parseFloat(
-        Math.max(0, this.config.stopWin - this.state.dailyProfit).toFixed(2),
+        Math.max(0, c.targetProfit - this.state.dailyProfit).toFixed(2),
       ),
       winRate: this.calculator.calculateWinRate(
         this.state.totalWins,
@@ -356,18 +312,19 @@ export class SmartRecoveryEngine {
       consecutiveWins: this.state.consecutiveWins,
       consecutiveLosses: this.state.consecutiveLosses,
       isStopAtingido: this.state.isStopAtingido,
-      isMetaBatida: this.calculator.isStopWinAtingido(this.state.dailyProfit),
+      isMetaBatida: this.calculator.isStopWinAtingido(this.state.dailyProfit, c.targetProfit),
       levelTable: this.state.levelTable,
     };
   }
 
   getEntry(): SorosGaleEntry {
+    const c = this.cfg();
     if (!this.state.levelTable || this.state.levelTable.length === 0) {
       sreLogger.error("getEntry: levelTable VAZIA! Gerando tabela de emergência", {
         currentLevel: this.state.currentLevel,
         phase: this.state.phase,
       });
-      this.state.levelTable = this.calculator.generateLevelTable(this.config);
+      this.state.levelTable = this.calculator.generateLevelTable(this.makeConfigObj(c));
     }
 
     const safeLevel = Math.max(
@@ -382,7 +339,7 @@ export class SmartRecoveryEngine {
         tableLen: this.state.levelTable.length,
       });
       return {
-        valor: this.config.initialStake,
+        valor: c.initialStake,
         level: 0,
         entry: 1,
         isSoros: false,
@@ -391,14 +348,6 @@ export class SmartRecoveryEngine {
     }
 
     if (this.state.entryNumber === 2) {
-      sreLogger.info("getEntry → SOROS (Entry 2)", {
-        valor: row.entry2,
-        level: this.state.currentLevel,
-        entry: 2,
-        capitalPending: this.state.capitalPending,
-        rowEntry1: row.entry1,
-        rowEntry2: row.entry2,
-      });
       return {
         valor: row.entry2,
         level: this.state.currentLevel,
@@ -408,12 +357,6 @@ export class SmartRecoveryEngine {
       };
     }
 
-    sreLogger.info("getEntry → ENTRY_1", {
-      valor: row.entry1,
-      level: this.state.currentLevel,
-      entry: 1,
-      capitalPending: this.state.capitalPending,
-    });
     return {
       valor: row.entry1,
       level: this.state.currentLevel,
@@ -431,11 +374,8 @@ export class SmartRecoveryEngine {
     return [];
   }
 
-  // ═══════════════════════════════════════════════
-  // AI FINANCIAL AGENT
-  // ═══════════════════════════════════════════════
-
   evaluateAIDecision(history?: SmartRecoveryHistory): AIFinancialDecision {
+    const c = this.cfg();
     const decision: AIFinancialDecision = {
       action: "continue",
       reason: "",
@@ -447,7 +387,6 @@ export class SmartRecoveryEngine {
     const currentLevel = this.state.currentLevel;
     const currentRow = this.calculator.getLevelRow(currentLevel, this.state.levelTable);
 
-    // 1. STOP LOSS
     if (this.state.isStopAtingido) {
       decision.action = "stop-session";
       decision.reason = `Stop loss atingido. Perda: R$ ${this.state.dailyLoss.toFixed(2)}`;
@@ -455,7 +394,6 @@ export class SmartRecoveryEngine {
       return decision;
     }
 
-    // 2. Consecutive losses >= 5
     if (this.state.consecutiveLosses >= 5) {
       decision.action = "pause";
       decision.reason = `${this.state.consecutiveLosses} losses consecutivos. Pausando.`;
@@ -463,7 +401,6 @@ export class SmartRecoveryEngine {
       return decision;
     }
 
-    // 3. Nível sem recuperação matemática (canRecover = false)
     if (currentRow && !currentRow.canRecover) {
       decision.action = "reduce-stake";
       decision.reason = `Nível ${currentLevel} não permite recuperação matemática (profit1+profit2 < accLoss).`;
@@ -471,7 +408,6 @@ export class SmartRecoveryEngine {
       return decision;
     }
 
-    // 4. Oscilação de nível (ex: L0→L1→L0→L1 repetidamente)
     if (h.isLevelOscillating(currentLevel, 3)) {
       decision.action = "pause";
       decision.reason = `Oscilação detectada no nível ${currentLevel} (${h.getLevelCycleCount().get(currentLevel) ?? 0} visitas). Mercado lateral?`;
@@ -479,7 +415,6 @@ export class SmartRecoveryEngine {
       return decision;
     }
 
-    // 5. Win rate baixo no nível atual
     const winRateAtLevel = h.getWinRateAtLevel(currentLevel);
     if (winRateAtLevel > 0 && winRateAtLevel < 30) {
       decision.action = "pause";
@@ -488,15 +423,13 @@ export class SmartRecoveryEngine {
       return decision;
     }
 
-    // 6. CPR alto (> 30% da banca)
-    if (this.state.capitalPending > this.config.bankroll * 0.3) {
+    if (this.state.capitalPending > c.initialBankroll * 0.3) {
       decision.action = "reduce-stake";
-      decision.reason = `CPR alto: R$ ${this.state.capitalPending.toFixed(2)} (${((this.state.capitalPending / this.config.bankroll) * 100).toFixed(1)}% da banca).`;
+      decision.reason = `CPR alto: R$ ${this.state.capitalPending.toFixed(2)} (${((this.state.capitalPending / c.initialBankroll) * 100).toFixed(1)}% da banca).`;
       decision.confidence = 75;
       return decision;
     }
 
-    // 7. Padrão alternado (WIN→LOSS→WIN→LOSS) nos últimos 4 resultados no nível
     const last4 = h.getLastResultsAtLevel(currentLevel, 4);
     if (last4.length === 4) {
       const alternating =
@@ -509,7 +442,6 @@ export class SmartRecoveryEngine {
       }
     }
 
-    // 8. Multiple Soros failures
     const sorosOps = h.getOperations().filter((op) => op.entryNumber === 2 && op.result === "LOSS");
     if (sorosOps.length >= 3) {
       const recentSoros = sorosOps.slice(-3);
@@ -521,42 +453,16 @@ export class SmartRecoveryEngine {
       }
     }
 
-    // 9. Tudo OK — operar normalmente
     decision.reason = "Operando normalmente.";
     decision.confidence = 60;
     return decision;
   }
 
-  // ═══════════════════════════════════════════════
-  // CONFIGURAÇÃO
-  // ═══════════════════════════════════════════════
-
-  /**
-   * Define valores de entrada customizados para cada nível.
-   * Ex: [2, 4, 8, 16] → nível 0 entry1=2, nível 1 entry1=4, etc.
-   */
-  updateLevels(niveis: number[]): void {
-    this.config.customLevels = niveis;
-    this.calculator.updateConfig(this.config);
-    this.state.levelTable = this.calculator.generateLevelTable(this.config);
+  regenerateLevelTable(): void {
+    const c = this.cfg();
+    this.state.levelTable = this.calculator.generateLevelTable(this.makeConfigObj(c));
     this.emit("config.updated");
   }
-
-  updateConfig(config: Partial<SorosGaleConfig>): void {
-    this.config = { ...this.config, ...config };
-    this.calculator.updateConfig(this.config);
-    // Regenera tabela com nova config
-    this.state.levelTable = this.calculator.generateLevelTable(this.config);
-    this.emit("config.updated");
-  }
-
-  setRecoveryFactor(_factor: number): void {
-    // Não usado no SorosGale, apenas para compatibilidade
-  }
-
-  // ═══════════════════════════════════════════════
-  // CONTROLE DE SESSÃO
-  // ═══════════════════════════════════════════════
 
   startSession(): void {
     this.state = this.createInitialState();
@@ -594,10 +500,6 @@ export class SmartRecoveryEngine {
     return this.state.phase === "STOP" || this.state.phase === "FINALIZADO";
   }
 
-  // ═══════════════════════════════════════════════
-  // PRIVATE
-  // ═══════════════════════════════════════════════
-
   getHistory(): SmartRecoveryHistory {
     return this.history;
   }
@@ -612,6 +514,7 @@ export class SmartRecoveryEngine {
     currentEntry: 1 | 2,
     currentLevel: number,
   ): SorosGaleOperation {
+    const c = this.cfg();
     return {
       id: `op-${Date.now()}-${this.operationCounter}`,
       timestamp: new Date(),
@@ -619,7 +522,7 @@ export class SmartRecoveryEngine {
       asset: "",
       direction,
       stake,
-      payout: this.config.payout,
+      payout: c.payout,
       cprBefore: parseFloat(cprBefore.toFixed(2)),
       cprAfter: parseFloat(cprAfter.toFixed(2)),
       result,
@@ -630,12 +533,26 @@ export class SmartRecoveryEngine {
     };
   }
 
+  private makeConfigObj(c: SRConfigSource): SorosGaleConfig {
+    return {
+      bankroll: c.initialBankroll,
+      initialStake: c.initialStake,
+      payout: c.payout,
+      stopLoss: c.stopLoss,
+      stopWin: c.targetProfit,
+      maxLevel: c.maxLevel,
+      customLevels: c.customLevels.length > 0 ? c.customLevels : undefined,
+    };
+  }
+
   private createInitialState(): SorosGaleState {
+    const c = this.cfg();
+    const sgConfig = this.makeConfigObj(c);
     return {
       phase: "IDLE",
       currentLevel: 0,
       entryNumber: 1,
-      bankroll: this.config.bankroll,
+      bankroll: c.initialBankroll,
       dailyProfit: 0,
       dailyLoss: 0,
       capitalPending: 0,
@@ -650,7 +567,7 @@ export class SmartRecoveryEngine {
       maxConsecutiveLosses: 0,
       winRate: 0,
       isStopAtingido: false,
-      levelTable: this.calculator.generateLevelTable(this.config),
+      levelTable: this.calculator.generateLevelTable(sgConfig),
       sessionStartTime: new Date(),
       lastOperationTime: null,
     };

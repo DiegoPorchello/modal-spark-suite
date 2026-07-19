@@ -16,11 +16,6 @@ export class SmartRecoveryCalculator {
     return { ...this.config };
   }
 
-  /**
-   * Gera a tabela completa de níveis (0 até maxLevel).
-   * Se config.customLevels[] for fornecido, usa entry1 = customLevels[level].
-   * Caso contrário: níveis 0,1,2 = initialStake, nível 3+ = accLossBefore / 2
-   */
   generateLevelTable(config?: SorosGaleConfig): LevelRow[] {
     const cfg = config ?? this.config;
     const table: LevelRow[] = [];
@@ -47,8 +42,6 @@ export class SmartRecoveryCalculator {
 
       const accLossAfter = parseFloat((accLoss + entry1).toFixed(2));
 
-      // Pode recuperar? Só se passar pelo SOROS (entry2):
-      // Se entry1 ganhar (profit1) + entry2 ganhar (profit2) >= accLossAfter
       const totalRecovery = parseFloat((profit1 + profit2).toFixed(2));
       const canRecover = totalRecovery >= accLossAfter;
 
@@ -63,48 +56,29 @@ export class SmartRecoveryCalculator {
         canRecover,
       });
 
-      // Para o próximo nível, o acumulado só aumenta com entry1 (entry2 não acumula)
       accLoss = accLossAfter;
     }
 
     return table;
   }
 
-  /**
-   * Busca a linha da tabela para um nível específico.
-   */
   getLevelRow(level: number, table: LevelRow[]): LevelRow {
     const idx = Math.min(level, table.length - 1);
     return table[idx];
   }
 
-  /**
-   * Calcula o valor da entrada baseado no nível e fase atual.
-   */
   calculateEntry1(level: number, table: LevelRow[]): number {
     return this.getLevelRow(level, table).entry1;
   }
 
-  /**
-   * Calcula a Entry 2 (SOROS) = entry1 + (entry1 × payout)
-   */
-  calculateEntry2(entry1: number, payout?: number): number {
-    const p = payout ?? this.config.payout;
-    return parseFloat((entry1 + entry1 * p).toFixed(2));
+  calculateEntry2(entry1: number, payout: number): number {
+    return parseFloat((entry1 + entry1 * payout).toFixed(2));
   }
 
-  /**
-   * Calcula profit de uma entrada
-   */
-  calculateProfit(stake: number, payout?: number): number {
-    const p = payout ?? this.config.payout;
-    return parseFloat((stake * p).toFixed(2));
+  calculateProfit(stake: number, payout: number): number {
+    return parseFloat((stake * payout).toFixed(2));
   }
 
-  /**
-   * Encontra o primeiro nível onde a recuperação total (profit1 + profit2)
-   * é >= accLossAfter. Retorna o level ou -1 se nenhum for suficiente.
-   */
   findRecoveryLevel(accLoss: number, table: LevelRow[]): number {
     for (const row of table) {
       if (row.accLossAfter >= accLoss && row.canRecover) {
@@ -114,20 +88,18 @@ export class SmartRecoveryCalculator {
     return -1;
   }
 
-  // ── Utilitários de estado ──
-
-  isStopLossAtingido(dailyLoss: number): boolean {
-    return this.config.stopLoss > 0 && dailyLoss >= this.config.stopLoss;
+  isStopLossAtingido(dailyLoss: number, stopLoss: number): boolean {
+    return stopLoss > 0 && dailyLoss >= stopLoss;
   }
 
-  isStopWinAtingido(dailyProfit: number): boolean {
-    return this.config.stopWin > 0 && dailyProfit >= this.config.stopWin;
+  isStopWinAtingido(dailyProfit: number, stopWin: number): boolean {
+    return stopWin > 0 && dailyProfit >= stopWin;
   }
 
-  canOperate(state: SorosGaleState): boolean {
+  canOperate(state: SorosGaleState, stopLoss: number, stopWin: number): boolean {
     if (state.phase === "STOP" || state.phase === "FINALIZADO") return false;
-    if (this.isStopLossAtingido(state.dailyLoss)) return false;
-    if (this.isStopWinAtingido(state.dailyProfit)) return false;
+    if (this.isStopLossAtingido(state.dailyLoss, stopLoss)) return false;
+    if (this.isStopWinAtingido(state.dailyProfit, stopWin)) return false;
     return true;
   }
 

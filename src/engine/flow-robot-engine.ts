@@ -14,6 +14,16 @@ import type { NextTrade, EntryRecord } from "./execution/types";
 import { getPrecisionColor, getPrecisionColorClass } from "./execution/types";
 import { latencyTracker } from "./latency-tracker";
 import { LatencyScanner } from "./latency-scanner";
+import { buildDecisionContext } from "../modules/flow-continuity/services/decision-context-builder";
+import type { DecisionContext } from "../modules/flow-continuity/types/decision-context.types";
+import { buildOperationContext } from "../modules/flow-continuity/services/operation-context-builder";
+import type { OperationContext } from "../modules/flow-continuity/types/operation-context.types";
+import { buildReplayContext } from "../modules/flow-continuity/services/replay-engine";
+import type { ReplayContext } from "../modules/flow-continuity/types/replay-context.types";
+import { buildPerformanceContext, buildSnapshot } from "../modules/performance/services/performance-engine";
+import type { PerformanceContext } from "../modules/performance/types/performance-context.types";
+import { performanceHistory } from "../modules/performance/services/performance-history";
+import { StrategyManager } from "../services/strategy-manager";
 
 /**
  * Ativos sintéticos Puma — não existem na Binance.
@@ -55,6 +65,8 @@ export interface RobotOperation {
   payout: number;
   profit: number;
   entryPrice: number;
+  timeframe: string;
+  expirationSeconds: number;
 }
 
 export interface RobotConfig {
@@ -72,6 +84,10 @@ export interface RobotConfig {
   assets: string[];
   assetCooldownMinutes: number;
   globalCooldownSec: number;
+  initialStake: number;
+  payout: number;
+  maxLevel: number;
+  customLevels: number[];
   // Callback opcional para sobrescrever resultado do broker (WIN/LOSS/DRAW)
   // Recebe: tradeId, asset, direction, amount, brokerResult, entryPrice
   // Retorna: "WIN" | "LOSS" | "DRAW" | null (null = usa resultado do broker)
@@ -173,6 +189,10 @@ export const DEFAULT_ROBOT_CONFIG: RobotConfig = {
   scanMode: "multi",
   assetCooldownMinutes: 5,
   globalCooldownSec: 180,
+  initialStake: 2,
+  payout: 0.86,
+  maxLevel: 15,
+  customLevels: [],
   assets: [
     "EURUSD",
     "GBPUSD",
@@ -246,8 +266,6 @@ export class FlowRobotEngine {
   private decisionEngine: DecisionEngine;
   private _candleCloseUnsub: (() => void) | null = null;
   private _sessionUnsub: (() => void) | null = null;
-  private _customLevels: number[] = [];
-  private _customPayout: number = 0.86;
   private assetCooldowns: Map<string, number> = new Map();
   private _balanceRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private _balanceSource: "REAL" | "MOCK" = "MOCK";
@@ -259,29 +277,39 @@ export class FlowRobotEngine {
   private static _isProcessing = false;
   private static _pendingCandleClose = false;
   private _globalCooldownUntil: number = 0;
+  private _lastDecisionContext: DecisionContext | null = null;
+  private _decisionHistory: DecisionContext[] = [];
+  private static readonly MAX_DECISION_HISTORY = 20;
+  private _lastOperationContext: OperationContext | null = null;
+  private _operationHistory: OperationContext[] = [];
+  private static readonly MAX_OPERATION_HISTORY = 100;
+  private _lastReplayContext: ReplayContext | null = null;
+  private _replayHistory: ReplayContext[] = [];
+  private static readonly MAX_REPLAY_HISTORY = 100;
+  private _lastPerformanceContext: PerformanceContext | null = null;
 
   constructor(broker: PumaBrokerAdapter) {
     this.instanceId = FlowRobotEngine._nextId++;
     this.broker = broker;
-    this.smartRecovery = new SmartRecoveryEngine({
-      bankroll: DEFAULT_ROBOT_CONFIG.initialBankroll,
-      initialStake: 2,
-      payout: 0.86,
-      stopLoss: DEFAULT_ROBOT_CONFIG.stopLoss,
-      stopWin: DEFAULT_ROBOT_CONFIG.targetProfit,
-      maxLevel: 15,
-    });
-    this.decisionEngine = new DecisionEngine();
-    this.executionEngine = new ExecutionEngine(broker);
 
-    // Inicializa com a sessão atual do broker
-    // Tenta restaurar config persistida (localStorage) — sobrescreve defaults se existir
+    // Config e sessão devem ser resolvidas ANTES do SmartRecoveryEngine,
+    // pois seu construtor invoca configGetter() → () => this._state.config
     const savedConfig = loadPersistedConfig();
     const initialConfig = savedConfig
       ? { ...DEFAULT_ROBOT_CONFIG, ...savedConfig }
       : DEFAULT_ROBOT_CONFIG;
     const sessionInfo = this.broker.getSessionInfo();
     const currentSession = sessionInfo?.currentSession;
+
+    // Estado mínimo apenas com config para que o configGetter do
+    // SmartRecoveryEngine funcione durante sua construção
+    this._state = { config: initialConfig } as RobotState;
+
+    this.smartRecovery = new SmartRecoveryEngine(() => this._state.config);
+    this.decisionEngine = new DecisionEngine();
+    this.executionEngine = new ExecutionEngine(broker);
+
+    // Substitui pelo estado completo
     this._state = this._buildInitialState(initialConfig, currentSession, sessionInfo);
 
     // Escuta mudanças de sessão
@@ -428,16 +456,11 @@ export class FlowRobotEngine {
       );
     }
 
-    this.smartRecovery.updateConfig({
-      bankroll: mergedConfig.initialBankroll,
-      stopLoss: mergedConfig.stopLoss,
-      stopWin: mergedConfig.targetProfit,
-      payout: this._customPayout,
-    });
-    this.smartRecovery.startSession();
-    if (this._customLevels.length > 0) {
-      this.smartRecovery.updateLevels(this._customLevels);
+    if (this._state.config.customLevels.length > 0) {
+      this._state.config = { ...this._state.config, customLevels: [...mergedConfig.customLevels] };
     }
+    this.smartRecovery.regenerateLevelTable();
+    this.smartRecovery.startSession();
 
     let direction = mergedConfig.direction;
     if (mergedConfig.autoDirection) {
@@ -613,10 +636,7 @@ export class FlowRobotEngine {
     }
     const config = this._state.config;
     this.smartRecovery.reset();
-    if (this._customLevels.length > 0) {
-      this.smartRecovery.updateLevels(this._customLevels);
-    }
-    this.smartRecovery.updateConfig({ payout: this._customPayout });
+    this.smartRecovery.regenerateLevelTable();
     this.assetCooldowns.clear();
     this._globalCooldownUntil = 0;
     this._sessionStarted = false;
@@ -643,26 +663,24 @@ export class FlowRobotEngine {
     }
 
     persistConfig(this._state.config);
+    this.smartRecovery.regenerateLevelTable();
+    this._emit("state-changed");
   }
 
   updateCalculatorLevels(niveis: number[]): void {
-    this._customLevels = [...niveis];
-    this.smartRecovery.updateLevels(niveis);
-    this._emit("state-changed");
+    this.updateConfig({ customLevels: niveis });
   }
 
   updateCalculatorPayout(payout: number): void {
-    this._customPayout = payout;
-    this.smartRecovery.updateConfig({ payout });
-    this._emit("state-changed");
+    this.updateConfig({ payout });
   }
 
   getCustomLevels(): number[] {
-    return [...this._customLevels];
+    return [...this._state.config.customLevels];
   }
 
   getCalculatorPayout(): number {
-    return this.smartRecovery.getConfig().payout;
+    return this._state.config.payout;
   }
 
   getSREState() {
@@ -699,6 +717,41 @@ export class FlowRobotEngine {
   getGlobalCooldownRemaining(): number {
     const remaining = this._globalCooldownUntil - Date.now();
     return remaining > 0 ? remaining : 0;
+  }
+
+  /** Retorna o último DecisionContext construído */
+  getLastDecisionContext(): DecisionContext | null {
+    return this._lastDecisionContext;
+  }
+
+  /** Retorna histórico de DecisionContexts (máx. 20) */
+  getDecisionHistory(): DecisionContext[] {
+    return [...this._decisionHistory];
+  }
+
+  /** Retorna o último OperationContext construído */
+  getLastOperationContext(): OperationContext | null {
+    return this._lastOperationContext;
+  }
+
+  /** Retorna histórico de OperationContexts (máx. 100) */
+  getOperationHistory(): OperationContext[] {
+    return [...this._operationHistory];
+  }
+
+  /** Retorna o último ReplayContext construído */
+  getLastReplayContext(): ReplayContext | null {
+    return this._lastReplayContext;
+  }
+
+  /** Retorna histórico de ReplayContexts (máx. 100) */
+  getReplayHistory(): ReplayContext[] {
+    return [...this._replayHistory];
+  }
+
+  /** Retorna o último PerformanceContext construído */
+  getLastPerformanceContext(): PerformanceContext | null {
+    return this._lastPerformanceContext;
   }
 
   /** Retorna cooldowns ativos por ativo (asset → ms restantes) */
@@ -1023,6 +1076,20 @@ export class FlowRobotEngine {
       this._state.entryNumber = entrada.entry;
       this._emit("state-changed");
 
+      // ══ DECISION CONTEXT ══
+      if (this._state.lastAnalysis) {
+        const selectedTf = this._state.selectedTimeframe ?? this._state.config.timeframes[0];
+        this._lastDecisionContext = buildDecisionContext(this._state.lastAnalysis, {
+          timeframe: selectedTf,
+          marketType: DecisionEngine.isCryptoAsset(asset) ? "CRYPTO" : "FOREX",
+        });
+        this._decisionHistory.push(this._lastDecisionContext);
+        if (this._decisionHistory.length > FlowRobotEngine.MAX_DECISION_HISTORY) {
+          this._decisionHistory = this._decisionHistory.slice(-FlowRobotEngine.MAX_DECISION_HISTORY);
+        }
+        this._emitDecisionContext(this._lastDecisionContext);
+      }
+
       engineLogger.info("FlowRobot", `═══ DECISÃO #${did} ARMAZENADA para próximo candle ═══`, {
         decisionId: did,
         symbol: asset,
@@ -1106,6 +1173,12 @@ export class FlowRobotEngine {
       payout: this._state.nextTrade?.payout ?? 0.85,
       profit: 0,
       entryPrice: this._state.nextTrade?.entryPrice ?? 0,
+      timeframe: this._state.nextTrade?.timeframe ?? record.timeframe ?? "M1",
+      expirationSeconds:
+        this._state.nextTrade?.expiration ??
+        TIMEFRAME_EXPIRATION_MAP[record.timeframe] ??
+        this._state.config.expirationSeconds ??
+        60,
     };
 
     this._state.activeOperation = operation;
@@ -1168,13 +1241,13 @@ export class FlowRobotEngine {
           asset: record.symbol,
           direction: operation.direction,
           amount: operation.amount,
-          brokerResult: finalStatus,
+          brokerResult: finalStatus as "WIN" | "LOSS" | "DRAW" | "UNKNOWN",
           entryPrice: operation.entryPrice ?? 0,
         });
         if (customResult) {
           engineLogger.info("FlowRobot", "Resultado sobrescrito por onTradeResult", {
             tradeId: record.tradeId,
-            brokerResult: finalStatus,
+          brokerResult: finalStatus as "WIN" | "LOSS" | "DRAW" | "UNKNOWN",
             customResult,
           });
           effectiveStatus = customResult;
@@ -1200,6 +1273,31 @@ export class FlowRobotEngine {
           tradeId: record.tradeId,
           removed: true,
           reason: "UNKNOWN",
+          pendingTrades: 0,
+        });
+        return;
+      }
+
+      // Previne duplicatas: se operação com o mesmo orderId já existe, não adiciona novamente
+      const existingOperationIndex = this._state.operations.findIndex(op => op.orderId === record.tradeId);
+      if (existingOperationIndex !== -1) {
+        engineLogger.warn("FlowRobot", `⚠️ Operação duplicada detectada para o mesmo orderId: ${record.tradeId}`, {});
+        operation.result = "unknown";
+        operation.profit = operation.profit; // Mantém o profit original ao invés de zerar
+        operation.status = "completed";
+        operation.closedAt = new Date();
+        this._state.operations[existingOperationIndex] = operation;
+        this._state.activeOperation = null;
+        this._state.status = "running";
+        persistOperations(this._state.operations);
+        this._emit("operation-closed", operation);
+        this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+        engineLogger.info("FlowRobot", `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após DUPLICATA`, {});
+        console.log("[EXECUTION QUEUE]", {
+          decisionId: record.decisionId,
+          tradeId: record.tradeId,
+          removed: true,
+          reason: "DUPLICATA",
           pendingTrades: 0,
         });
         return;
@@ -1322,6 +1420,52 @@ export class FlowRobotEngine {
       this._state.operations.unshift(operation);
       this._state.activeOperation = null;
       this._state.status = "running";
+
+      // ══ OPERATION CONTEXT ══
+      if (this._lastDecisionContext) {
+        const strategyManager = StrategyManager.getInstance();
+        const strategy = strategyManager.getActiveProfile();
+        const operationStatus = isWin ? "WIN" : isLoss ? "LOSS" : "DRAW";
+        const lastAnalysis = this._state.lastAnalysis;
+        const opCtx = buildOperationContext({
+          decisionContext: this._lastDecisionContext,
+          entryRecord: record,
+          brokerTradeId: record.tradeId,
+          direction: operation.direction.toUpperCase() as "CALL" | "PUT",
+          status: operationStatus,
+          entryPrice: operation.entryPrice,
+          exitPrice: 0,
+          profit: operation.profit,
+          amount: operation.amount,
+          payout: operation.payout,
+          expiration: operation.expirationSeconds,
+          broker: "Puma",
+          executionSource: "AUTO",
+          score: lastAnalysis?.scoreBreakdown?.total ?? 0,
+          recoveryLevel: this._state.currentRecoveryStep,
+          isRecovery: this._state.currentRecoveryStep > 0,
+        });
+        this._lastOperationContext = opCtx;
+        this._operationHistory.unshift(opCtx);
+        if (this._operationHistory.length > FlowRobotEngine.MAX_OPERATION_HISTORY) {
+          this._operationHistory = this._operationHistory.slice(-FlowRobotEngine.MAX_OPERATION_HISTORY);
+        }
+        this._emitOperationContext(opCtx);
+
+        // Build and emit ReplayContext (pure reconstruction, no recalculation)
+        if (this._lastDecisionContext) {
+          const replayCtx = buildReplayContext(opCtx, this._lastDecisionContext);
+          this._lastReplayContext = replayCtx;
+          this._replayHistory.unshift(replayCtx);
+          if (this._replayHistory.length > FlowRobotEngine.MAX_REPLAY_HISTORY) {
+            this._replayHistory = this._replayHistory.slice(-FlowRobotEngine.MAX_REPLAY_HISTORY);
+          }
+          this._emitReplayContext(replayCtx);
+
+          // Build and emit PerformanceContext (pure computation from histories)
+          this._emitPerformanceContext();
+        }
+      }
 
       // Log de liberação da fila de execução
       const releaseReason = isWin ? "WIN" : isLoss ? "LOSS" : "DRAW";
@@ -1803,9 +1947,10 @@ export class FlowRobotEngine {
       // _runOperationCycle NÃO define nextTrade — apenas _onDecisionTime.
       // O fluxo de análise para UI/statistics continua rodando, mas sem
       // sobrescrever a decisão da janela de decisão.
+      const nt = this._state.nextTrade as import("./execution/types").NextTrade | null;
       engineLogger.info("FlowRobot", "Ciclo de análise concluído (nextTrade NÃO foi definido — aguardando _onDecisionTime)", {
-        hasNextTrade: !!this._state.nextTrade?.valid,
-        decisionId: this._state.nextTrade?.decisionId,
+        hasNextTrade: !!nt?.valid,
+        decisionId: nt?.decisionId,
       });
 
       this._scheduleNextOperation(this._getIntervalSeconds());
@@ -2275,6 +2420,7 @@ export class FlowRobotEngine {
       const timeframe = bestTimeframe;
       const candles = bestCandles;
       this._state.selectedTimeframe = timeframe;
+      this._state.lastAnalysis = decision;
 
       // ── ETAPA 2: Analisando mercado ──
       this._emitDiagnostic("analyzing", "loading", "Executando Decision Engine...");
@@ -2649,6 +2795,54 @@ export class FlowRobotEngine {
     }
   }
 
+  private _emitDecisionContext(ctx: DecisionContext): void {
+    try {
+      analystBus.emit("decision.context" as AnalystEventType, ctx as unknown as Record<string, unknown>);
+    } catch (err) {
+      engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar decision context", {
+        error: String(err),
+      });
+    }
+  }
+
+  private _emitOperationContext(ctx: OperationContext): void {
+    try {
+      analystBus.emit("operation.context" as AnalystEventType, ctx as unknown as Record<string, unknown>);
+    } catch (err) {
+      engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar operation context", {
+        error: String(err),
+      });
+    }
+  }
+
+  private _emitReplayContext(ctx: ReplayContext): void {
+    try {
+      analystBus.emit("replay.context" as AnalystEventType, ctx as unknown as Record<string, unknown>);
+    } catch (err) {
+      engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar replay context", {
+        error: String(err),
+      });
+    }
+  }
+
+  private _emitPerformanceContext(): void {
+    try {
+      const perfCtx = buildPerformanceContext(
+        this._decisionHistory,
+        this._operationHistory,
+        this._replayHistory,
+      );
+      this._lastPerformanceContext = perfCtx;
+      analystBus.emit("performance.context" as AnalystEventType, perfCtx as unknown as Record<string, unknown>);
+      // Record snapshot in history (FIFO 365 days)
+      performanceHistory.record(perfCtx);
+    } catch (err) {
+      engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar performance context", {
+        error: String(err),
+      });
+    }
+  }
+
   private _emitDiagnostic(
     step:
       | "receiving"
@@ -2711,8 +2905,9 @@ export class FlowRobotEngine {
         engineLogger.info("FlowRobot", `Sessão iniciada — initialBankroll=${newBalance} (saldo real Puma)`, {});
       }
 
-      // Atualiza SmartRecovery com saldo real
-      this.smartRecovery.updateConfig({ bankroll: newBalance });
+      // Atualiza config compartilhada com saldo real
+      this._state.config.initialBankroll = newBalance;
+      this.smartRecovery.regenerateLevelTable();
 
       console.log("[BALANCE SYNC]", {
         initialBankroll: this._state.initialBankroll,

@@ -1,9 +1,19 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useBroker } from "../hooks/useBroker";
 import { useRobot } from "../hooks/useRobot";
 import { useAnalystStore } from "../modules/analyst/AnalystStore";
 import { AnalystPanel } from "../modules/analyst/AnalystPanel";
+import { analystBus } from "../modules/analyst/EventBus";
+import { ActiveStrategyCard } from "../modules/flow-continuity/components/ActiveStrategyCard";
+import { MarketContextCard } from "../modules/flow-continuity/components/MarketContextCard";
+import { ReplayCard } from "../modules/flow-continuity/components/ReplayCard";
+import { ReplayDrawer } from "../modules/flow-continuity/components/ReplayDrawer";
+import { strategyManager } from "../services/strategy-manager";
+import { PerformanceIntelligencePanel } from "../modules/performance/components/PerformanceIntelligencePanel";
+import { IntelligenceSection } from "../modules/advisor/components/IntelligenceSection";
+import { buildAdvisorContext } from "../modules/advisor/services";
+import { advisorHistory } from "../modules/advisor/services/advisor-history";
 import {
   LayoutDashboard,
   TrendingUp,
@@ -44,6 +54,7 @@ import {
   CheckCircle2,
   ArrowUp,
   ArrowDown,
+  Brain,
 } from "lucide-react";
 import { CriticalErrorModal } from "../components/ui/CriticalErrorModal";
 import type {
@@ -145,6 +156,8 @@ function Dashboard() {
   const [chartTab, setChartTab] = useState<"grafico" | "estrutura">("grafico");
   const [modalOpen, setModalOpen] = useState<boolean>(false);
   const [currentPayout, setCurrentPayout] = useState<number>(0);
+  const [replayDrawerOpen, setReplayDrawerOpen] = useState(false);
+  const [selectedReplay, setSelectedReplay] = useState<import("../modules/flow-continuity/types/replay-context.types").ReplayContext | null>(null);
   const {
     connected,
     userName,
@@ -158,9 +171,92 @@ function Dashboard() {
   const store = useAnalystStore();
   const { state: robotState, engine, updateConfig } = useRobot();
 
+  // ── Build AdvisorContext from PerformanceContext ──
+  const advisorContext = useMemo(
+    () => buildAdvisorContext(store.performanceContext),
+    [store.performanceContext],
+  );
+
+  // ── Record advisor context to history and emit event ──
+  useEffect(() => {
+    if (advisorContext) {
+      advisorHistory.record(advisorContext);
+      analystBus.emit("advisor.context", advisorContext as unknown as Record<string, unknown>);
+    }
+  }, [advisorContext]);
+
+  const handleOpenReplay = useCallback((ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext) => {
+    setSelectedReplay(ctx);
+    setReplayDrawerOpen(true);
+  }, []);
+
   useEffect(() => {
     return () => console.log("[UNMOUNT] Dashboard");
   }, []);
+
+  // ── Wire analystBus events to the store ──
+  useEffect(() => {
+    const unsub = analystBus.subscribe((type, meta) => {
+      switch (type) {
+        case "decision.context":
+          store.setDecisionContext(meta as unknown as import("../modules/flow-continuity/types/decision-context.types").DecisionContext);
+          break;
+        case "operation.context":
+          store.setOperationContext(meta as unknown as import("../modules/flow-continuity/types/operation-context.types").OperationContext);
+          break;
+        case "replay.context":
+          store.setReplayContext(meta as unknown as import("../modules/flow-continuity/types/replay-context.types").ReplayContext);
+          break;
+        case "performance.context":
+          store.setPerformanceContext(meta as unknown as import("../modules/performance/types/performance-context.types").PerformanceContext);
+          break;
+        case "advisor.context":
+          store.setAdvisorContext(meta as unknown as import("../modules/advisor/types/advisor-context.types").AdvisorContext);
+          break;
+        case "score.breakdown":
+          store.setScoreBreakdown(meta as unknown as import("../modules/analyst/AnalystTypes").ScoreBreakdownDisplay);
+          break;
+        case "system.info": {
+          const m = meta as Record<string, unknown>;
+          if (m.aiState) store.setStatus(m.aiState as import("../modules/analyst/AnalystTypes").AnalystAIState);
+          if (m.reasoning) store.setReasoning(m.reasoning as import("../modules/analyst/AnalystTypes").AnalystReasoningItem[]);
+          if (m.confidence !== undefined) store.setConfidence(Number(m.confidence));
+          if (m.score !== undefined) store.setScore(Number(m.score));
+          if (m.nextAction) store.setNextAction(m.nextAction as import("../modules/analyst/AnalystTypes").AnalystNextAction);
+          if (m.stats) store.updateStats(m.stats as Partial<import("../modules/analyst/AnalystTypes").AnalystStats>);
+          if (m.diagnostic) {
+            const d = m.diagnostic as { step: string; status: string; message: string };
+            store.updateDiagnostic(d.step as import("../modules/analyst/AnalystTypes").DiagnosticStep, d.status as import("../modules/analyst/AnalystTypes").DiagnosticStatus, d.message);
+          }
+          break;
+        }
+        case "market.update": {
+          const m = meta as Record<string, unknown>;
+          store.updateMarket(m as Partial<import("../modules/analyst/AnalystTypes").MarketInfo>);
+          break;
+        }
+        case "candle.reading": {
+          const m = meta as Record<string, unknown>;
+          store.updateCandleReading(m as Partial<import("../modules/analyst/AnalystTypes").CandleReading>);
+          break;
+        }
+        case "diary.entry": {
+          const m = meta as Record<string, unknown>;
+          store.addDiaryEntry(String(m.text || ""), String(m.icon || "📝"), (m.level as import("../modules/analyst/AnalystTypes").AnalystMessageLevel) || "info");
+          break;
+        }
+        case "scanLog.update": {
+          const m = meta as Record<string, unknown>;
+          store.setScanLog(m.scanLog as import("../modules/analyst/AnalystTypes").ScanLogEntry[]);
+          break;
+        }
+        default:
+          store.addMessage(type, meta);
+          break;
+      }
+    });
+    return unsub;
+  }, [store]);
 
   // ── Sync: state local de timeframes com o config do engine ──
   useEffect(() => {
@@ -835,10 +931,10 @@ function Dashboard() {
 
         {/* Content */}
         <main className="flex-1 overflow-auto p-5 space-y-5">
-          {/* Top metrics row - dados reais */}
+          {/* Top metrics row */}
           <section className="flex gap-4 flex-wrap">
             <Metric
-              label="ATIVO OPERADO"
+              label="ACTIVE ASSET"
               value={getAssetDisplayName(
                 robotState.lastScannedAsset || robotState.config.asset || "EURUSD",
               )}
@@ -850,46 +946,17 @@ function Dashboard() {
             <Metric
               label="TIMEFRAME"
               value={robotState.selectedTimeframe || robotState.config.timeframes?.[0] || "M1"}
-              sub={`Expiração ${robotState.config.expirationSeconds >= 60 ? Math.round(robotState.config.expirationSeconds / 60) + " min" : robotState.config.expirationSeconds + "s"}`}
+              sub={`Expiration ${robotState.config.expirationSeconds >= 60 ? Math.round(robotState.config.expirationSeconds / 60) + " min" : robotState.config.expirationSeconds + "s"}`}
             />
+            <ActiveStrategyCard />
+            <MarketContextCard />
             <Metric
-              label="SCORE ATUAL"
-              value={String(
-                Math.round(
-                  robotState.lastAnalysis?.probability?.total ??
-                    robotState.lastAnalysis?.score?.total ??
-                    0,
-                ),
-              )}
-              badge={
-                (
-                  robotState.lastAnalysis?.score?.classification ??
-                  robotState.lastAnalysis?.probability?.level ??
-                  ""
-                ).toUpperCase() || undefined
-              }
-            />
-            <Metric
-              label="PROBABILIDADE"
-              value={`${Math.round(robotState.lastAnalysis?.probability?.total ?? 0)}%`}
-              sub={
-                (robotState.lastAnalysis?.probability?.total ?? 0) >= 85
-                  ? "Alta"
-                  : (robotState.lastAnalysis?.probability?.total ?? 0) >= 70
-                    ? "Moderada"
-                    : (robotState.lastAnalysis?.probability?.total ?? 0) > 0
-                      ? "Baixa"
-                      : "Aguardando"
-              }
-              accent={(robotState.lastAnalysis?.probability?.total ?? 0) >= 70}
-            />
-            <Metric
-              label="PAYOUT ATUAL"
+              label="CURRENT PAYOUT"
               value={currentPayout > 0 ? `${currentPayout}%` : "—"}
               accent={currentPayout >= 80}
             />
             <Metric
-              label="LUCRO DA SESSÃO"
+              label="SESSION PROFIT"
               value={`${robotState.sessionProfit >= 0 ? "+" : ""}${robotState.sessionProfit.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}`}
               sub={
                 robotState.initialBankroll > 0
@@ -905,26 +972,26 @@ function Dashboard() {
               accent
             />
             <Metric
-              label="STATUS DO ROBÔ"
+              label="ROBOT STATUS"
               value={
                 robotState.status === "running"
-                  ? "OPERANDO"
+                  ? "TRADING"
                   : robotState.status === "waiting-result"
-                    ? "AGUARDANDO"
+                    ? "WAITING"
                     : robotState.status === "paused"
-                      ? "PAUSADO"
+                      ? "PAUSED"
                       : robotState.status === "error"
-                        ? "ERRO"
-                        : "PARADO"
+                        ? "ERROR"
+                        : "STOPPED"
               }
               sub={
                 robotState.status === "running"
-                  ? "Automático"
+                  ? "Automatic"
                   : robotState.status === "waiting-result"
-                    ? "Processando"
+                    ? "Processing"
                     : robotState.status === "paused"
                       ? "Manual"
-                      : "Inativo"
+                      : "Inactive"
               }
               status={robotState.status === "running" || robotState.status === "waiting-result"}
             />
@@ -933,21 +1000,28 @@ function Dashboard() {
           <section className="p-4 panel flex items-center justify-between">
             <div className="flex items-center gap-4">
               <span className="text-xs font-semibold tracking-wider text-muted-foreground">
-                CONTROLE DO ROBÔ
+                ROBOT CONTROLS
               </span>
               <RobotControls />
             </div>
           </section>
 
-          {/* FLUXO DE CONTINUIDADE PRO - Configuração de Ativos */}
+          {/* FLOW CONTINUITY PRO - Asset Configuration */}
           {active === "config-ativos" && <AssetsConfigPanel />}
 
-          {/* Broker + Financeiro + Historico */}
+          {/* Broker + Finance + History */}
           <section className="grid grid-cols-12 gap-4">
             <BrokerCard />
             <FinancePanel />
-            <HistoryPanel />
+            <HistoryPanel onReplay={handleOpenReplay} />
           </section>
+
+          {/* Replay Card - Last Operation */}
+          {store.replayContext && (
+            <section className="grid grid-cols-12 gap-4">
+              <ReplayCard context={store.replayContext} onOpenDrawer={() => setReplayDrawerOpen(true)} />
+            </section>
+          )}
 
           {/* Analysis row */}
           <section className="grid grid-cols-12 gap-4">
@@ -964,6 +1038,13 @@ function Dashboard() {
             <RankingPanel />
           </section>
 
+          {/* ═══ INTELLIGENCE SECTION ═══ */}
+          <IntelligenceSection
+            advisorContext={advisorContext}
+            performanceContext={store.performanceContext}
+            feedEntries={advisorHistory.getLast(20)}
+          />
+
           {/* Status bar */}
           <section className="grid grid-cols-12 gap-4">
             <PerformancePanel />
@@ -973,22 +1054,27 @@ function Dashboard() {
         {/* Analyst Panel (Nexor AI) */}
         <AnalystPanel store={store} robotState={robotState} />
 
+        {/* Replay Drawer */}
+        {replayDrawerOpen && selectedReplay && (
+          <ReplayDrawer context={selectedReplay} onClose={() => setReplayDrawerOpen(false)} />
+        )}
+
         {/* Footer status */}
         <footer className="h-10 border-t border-border bg-panel flex items-center px-5 text-[11px] text-muted-foreground gap-6">
           <span className="flex items-center gap-2 text-success">
-            <span className="size-2 rounded-full bg-success" /> ROBO ATIVO
+            <span className="size-2 rounded-full bg-success" /> ROBOT ACTIVE
           </span>
           <span>
-            PRÓXIMA ANÁLISE: <span className="text-foreground font-mono">00:05</span>
+            NEXT ANALYSIS: <span className="text-foreground font-mono">00:05</span>
           </span>
           <span>
-            MODO: <span className="text-foreground">AUTOMÁTICO</span>
+            MODE: <span className="text-foreground">AUTOMATIC</span>
           </span>
           <span>
-            GERENCIAMENTO: <span className="text-success">SOROSGALE ●</span>
+            RISK: <span className="text-success">SOROSGALE ●</span>
           </span>
           <span className="ml-auto">
-            CONEXÃO: <span className="text-foreground">PUMA BROKER</span>
+            CONNECTION: <span className="text-foreground">PUMA BROKER</span>
           </span>
         </footer>
       </div>
@@ -1503,10 +1589,12 @@ function AnalysisPanel({
     const score = state.lastAnalysis?.score;
     const prob = state.lastAnalysis?.probability;
     if (breakdown && breakdown.length > 0) {
-      return breakdown.map((f: { name: string; passed: boolean; detail: string }) => ({
+      return breakdown.map((f) => ({
         label: f.name,
-        value: f.detail || (f.passed ? "✓" : "✗"),
-        ok: f.passed,
+        weight: f.maxPoints,
+        contribution: f.points,
+        value: f.detail || `${f.points}/${f.maxPoints}`,
+        ok: f.points >= f.maxPoints * 0.5,
       }));
     }
     // Fallback: build from probability breakdown
@@ -1514,27 +1602,37 @@ function AnalysisPanel({
     if (bd) {
       return [
         {
-          label: "Tendência",
+          label: "Tendencia",
+          weight: bd.trend.max,
+          contribution: bd.trend.score,
           value: `${bd.trend.score}/${bd.trend.max}`,
           ok: bd.trend.score > bd.trend.max * 0.5,
         },
         {
           label: "Estrutura",
+          weight: bd.structure.max,
+          contribution: bd.structure.score,
           value: `${bd.structure.score}/${bd.structure.max}`,
           ok: bd.structure.score > bd.structure.max * 0.5,
         },
         {
           label: "Price Action",
+          weight: bd.priceAction.max,
+          contribution: bd.priceAction.score,
           value: `${bd.priceAction.score}/${bd.priceAction.max}`,
           ok: bd.priceAction.score > bd.priceAction.max * 0.5,
         },
         {
           label: "Smart Money",
+          weight: bd.smartMoney.max,
+          contribution: bd.smartMoney.score,
           value: `${bd.smartMoney.score}/${bd.smartMoney.max}`,
           ok: bd.smartMoney.score > bd.smartMoney.max * 0.5,
         },
         {
           label: "Momentum",
+          weight: bd.momentum.max,
+          contribution: bd.momentum.score,
           value: `${bd.momentum.score}/${bd.momentum.max}`,
           ok: bd.momentum.score > bd.momentum.max * 0.5,
         },
@@ -1542,26 +1640,31 @@ function AnalysisPanel({
     }
     // Static fallback
     return [
-      { label: "Continuidade", value: "—", ok: false },
-      { label: "Dominância", value: "—", ok: false },
-      { label: "Força do Candle", value: "—", ok: false },
-      { label: "Estrutura (S/R)", value: "—", ok: false },
-      { label: "Histórico (Catálogo)", value: "—", ok: false },
+      { label: "Continuidade", weight: 20, contribution: 0, value: "—", ok: false },
+      { label: "Dominancia", weight: 15, contribution: 0, value: "—", ok: false },
+      { label: "Forca do Candle", weight: 15, contribution: 0, value: "—", ok: false },
+      { label: "Estrutura (S/R)", weight: 10, contribution: 0, value: "—", ok: false },
+      { label: "Historico (Catalogo)", weight: 10, contribution: 0, value: "—", ok: false },
     ];
   })();
   const filters = (() => {
     const analysisFilters = state.lastAnalysis?.filters;
     if (analysisFilters && analysisFilters.length > 0) {
-      return analysisFilters.map((f) => ({ label: f.name, ok: f.passed }));
+      return analysisFilters.map((f) => ({
+        label: f.name,
+        detail: f.detail,
+        ok: f.passed,
+        statusText: f.passed ? "APPROVED" : "REJECTED",
+      }));
     }
     // Static fallback
     return [
-      { label: "Continuidade", ok: false },
-      { label: "Força do Candle", ok: false },
-      { label: "Distância de S/R", ok: false },
-      { label: "Lateralização", ok: false },
-      { label: "Rompimento", ok: false },
-      { label: "Horário Favorável", ok: false },
+      { label: "Continuidade", detail: "", ok: false, statusText: "PENDING" },
+      { label: "Forca do Candle", detail: "", ok: false, statusText: "PENDING" },
+      { label: "Distancia de S/R", detail: "", ok: false, statusText: "PENDING" },
+      { label: "Lateralizacao", detail: "", ok: false, statusText: "PENDING" },
+      { label: "Rompimento", detail: "", ok: false, statusText: "PENDING" },
+      { label: "Horario Favoravel", detail: "", ok: false, statusText: "PENDING" },
     ];
   })();
 
@@ -1588,32 +1691,43 @@ function AnalysisPanel({
       <div className="flex items-center gap-2 mb-4">
         <Activity className="size-4 text-success" />
         <h3 className="text-sm font-semibold tracking-wide">
-          ANÁLISE DO ROBÔ - FLUXO DE CONTINUIDADE PRO
+          ROBOT ANALYSIS - FLOW CONTINUITY PRO
         </h3>
       </div>
       <div className="grid grid-cols-12 gap-4">
         {/* Motor de Score */}
         <div className="col-span-4">
           <div className="text-[10px] tracking-widest text-muted-foreground mb-3">
-            MOTOR DE SCORE
+            SCORE ENGINE
           </div>
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {scoreItems.map((s) => (
               <div
                 key={s.label}
                 className="flex items-center justify-between text-xs bg-secondary/40 rounded px-3 py-2"
               >
-                <span className="flex items-center gap-2">
-                  <Check className="size-3 text-success" />
-                  {s.label}
+                <span className="flex items-center gap-2 min-w-0">
+                  {s.ok ? (
+                    <Check className="size-3 text-success shrink-0" />
+                  ) : (
+                    <X className="size-3 text-danger shrink-0" />
+                  )}
+                  <span className="truncate">{s.label}</span>
                 </span>
-                <span className="font-mono text-success">{s.value}</span>
+                <span className="flex items-center gap-3 shrink-0 ml-2">
+                  <span className="text-[10px] text-muted-foreground font-mono">
+                    W:{s.weight}
+                  </span>
+                  <span className={`font-mono font-semibold ${s.ok ? "text-success" : "text-danger"}`}>
+                    +{s.contribution}
+                  </span>
+                </span>
               </div>
             ))}
           </div>
           <div className="mt-4 border-t border-border pt-3">
             <div className="flex justify-between text-xs">
-              <span className="text-muted-foreground">SCORE FINAL</span>
+              <span className="text-muted-foreground">FINAL SCORE</span>
               <span className="font-mono">
                 <span className="text-success font-bold text-base">
                   {Math.round(
@@ -1624,7 +1738,7 @@ function AnalysisPanel({
               </span>
             </div>
             <div className="flex justify-between items-center text-xs mt-3">
-              <span className="text-muted-foreground">CLASSIFICAÇÃO</span>
+              <span className="text-muted-foreground">CLASSIFICATION</span>
               <span className="bg-success/15 text-success px-2 py-1 rounded text-[10px] font-bold tracking-wider">
                 {(
                   state.lastAnalysis?.score?.classification ??
@@ -1635,11 +1749,42 @@ function AnalysisPanel({
             </div>
           </div>
 
+          {/* Active Strategy */}
+          <div className="mt-4 border-t border-border pt-3">
+            <div className="text-[10px] tracking-widest text-muted-foreground mb-2">
+              ACTIVE STRATEGY
+            </div>
+            <div className="bg-secondary/40 rounded p-3 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Profile</span>
+                <span className="font-semibold text-foreground/90">
+                  {strategyManager.getActiveProfile().name}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Description</span>
+                <span className="text-foreground/70 text-right max-w-[180px] truncate">
+                  {strategyManager.getActiveProfile().description}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Market</span>
+                <span className="font-mono text-foreground/80">
+                  {state.config.asset || state.lastScannedAsset || "—"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Source</span>
+                <span className="text-foreground/70">StrategyManager</span>
+              </div>
+            </div>
+          </div>
+
           {/* Configuração do Robô */}
           <div className="mt-6 border-t border-border pt-4">
             <div className="flex items-center justify-between mb-3">
               <div className="text-[10px] tracking-widest text-muted-foreground">
-                CONFIGURAÇÃO DO ROBÔ
+                ROBOT CONFIG
               </div>
               <button
                 onClick={handleSaveConfig}
@@ -1655,21 +1800,21 @@ function AnalysisPanel({
                 <Save className="size-3.5" />
                 {saving ? (
                   <>
-                    <Loader2 className="size-3.5 animate-spin" /> SALVANDO...
+                    <Loader2 className="size-3.5 animate-spin" /> SAVING...
                   </>
                 ) : saved ? (
                   <>
-                    <Check className="size-3.5" /> SALVO
+                    <Check className="size-3.5" /> SAVED
                   </>
                 ) : (
-                  "SALVAR CONFIG"
+                  "SAVE CONFIG"
                 )}
               </button>
             </div>
             <div className="space-y-2 text-xs">
               <div className="grid grid-cols-2 gap-2">
                 <div className="bg-secondary/40 rounded p-2">
-                  <div className="text-[10px] text-muted-foreground">META DE LUCRO</div>
+                  <div className="text-[10px] text-muted-foreground">PROFIT TARGET</div>
                   <div className="font-mono text-success font-bold">
                     R$ {state.config.targetProfit.toLocaleString("pt-BR")}
                   </div>
@@ -1683,13 +1828,13 @@ function AnalysisPanel({
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div className="bg-secondary/40 rounded p-2">
-                  <div className="text-[10px] text-muted-foreground">COOLDOWN PÓS-LOSS</div>
+                  <div className="text-[10px] text-muted-foreground">POST-LOSS COOLDOWN</div>
                   <div className="font-mono text-warning font-bold">
                     {state.config.assetCooldownMinutes} min
                   </div>
                 </div>
                 <div className="bg-secondary/40 rounded p-2">
-                  <div className="text-[10px] text-muted-foreground">INTERVALO DE ANÁLISE</div>
+                  <div className="text-[10px] text-muted-foreground">ANALYSIS INTERVAL</div>
                   <div className="font-mono text-blue-400 font-bold">
                     {state.config.reAnalysisIntervalSec}s
                   </div>
@@ -1703,7 +1848,7 @@ function AnalysisPanel({
                       : "bg-secondary text-muted-foreground border border-border"
                   }`}
                 >
-                  MODO: {state.config.scanMode === "multi" ? "MULTI-ASSET" : "SINGLE"}
+                  SCAN: {state.config.scanMode === "multi" ? "MULTI-ASSET" : "SINGLE"}
                 </span>
                 <span
                   className={`px-2 py-1 rounded text-[10px] font-medium ${
@@ -1712,10 +1857,10 @@ function AnalysisPanel({
                       : "bg-secondary text-muted-foreground border border-border"
                   }`}
                 >
-                  {state.config.autoDirection ? "AUTO DIREÇÃO" : "DIREÇÃO FIXA"}
+                  {state.config.autoDirection ? "AUTO DIRECTION" : "FIXED DIRECTION"}
                 </span>
                 <span className="px-2 py-1 rounded text-[10px] font-medium bg-secondary text-muted-foreground border border-border">
-                  EXPIRAÇÃO: {state.config.expirationSeconds}s
+                  EXPIRATION: {state.config.expirationSeconds}s
                 </span>
               </div>
             </div>
@@ -1749,25 +1894,36 @@ function AnalysisPanel({
         {/* Filters */}
         <div className="col-span-3">
           <div className="text-[10px] tracking-widest text-muted-foreground mb-3">
-            FILTROS ATIVOS
+            ACTIVE FILTERS
           </div>
-          <div className="space-y-2">
+          <div className="space-y-1.5">
             {filters.map((f) => (
               <div
                 key={f.label}
                 className="flex items-center justify-between text-xs bg-secondary/40 rounded px-3 py-2"
               >
-                <span className="text-foreground/90">{f.label}</span>
-                {f.ok ? (
-                  <Check className="size-3.5 text-success" />
-                ) : (
-                  <X className="size-3.5 text-danger" />
-                )}
+                <span className="flex items-center gap-2 min-w-0">
+                  {f.ok ? (
+                    <Check className="size-3.5 text-success shrink-0" />
+                  ) : (
+                    <X className="size-3.5 text-danger shrink-0" />
+                  )}
+                  <span className="truncate text-foreground/90">{f.label}</span>
+                </span>
+                <span
+                  className={`text-[10px] font-semibold px-1.5 py-0.5 rounded shrink-0 ml-2 ${
+                    f.ok
+                      ? "bg-success/15 text-success"
+                      : "bg-danger/15 text-danger"
+                  }`}
+                >
+                  {f.statusText}
+                </span>
               </div>
             ))}
           </div>
           <div className="mt-4 border-t border-border pt-3">
-            <div className="text-[10px] tracking-widest text-muted-foreground mb-2">STATUS</div>
+            <div className="text-[10px] tracking-widest text-muted-foreground mb-2">DECISION STATUS</div>
             <div
               className={`text-xs font-semibold ${
                 state.status === "running"
@@ -1779,20 +1935,20 @@ function AnalysisPanel({
             >
               {state.status === "running"
                 ? state.lastAnalysis
-                  ? "Analisando"
-                  : "Escaneando"
+                  ? "Analyzing Market"
+                  : "Scanning Assets"
                 : state.status === "waiting-result"
-                  ? "Entrada Ativa"
+                  ? "Active Trade"
                   : state.status === "paused"
-                    ? "Pausado"
-                    : "Inativo"}
+                    ? "Paused"
+                    : "Inactive"}
             </div>
             <div className="text-[10px] text-muted-foreground mt-1">
               {state.activeOperation
                 ? `${state.activeOperation.direction.toUpperCase()} R$ ${state.activeOperation.amount.toFixed(2)}`
                 : state.nextTrade
-                  ? `Próxima: ${state.nextTrade.direction.toUpperCase()}`
-                  : "Confirmação da entrada"}
+                  ? `Next: ${state.nextTrade.direction.toUpperCase()}`
+                  : "Awaiting entry confirmation"}
             </div>
           </div>
         </div>
@@ -1994,10 +2150,9 @@ function RankingPanel() {
 }
 
 function CalcPanel() {
-  const { engine, state, updateCalculatorLevels, updateCalculatorPayout } = useRobot();
+  const { engine, state, updateConfig } = useRobot();
   const tableRows = engine?.getTableRows() ?? [];
   const sreState = engine?.getSREState() ?? null;
-  const sreConfig = engine?.getSmartRecovery()?.getConfig() ?? null;
   const nivelAtual = sreState?.currentLevel ?? state.currentRecoveryStep;
   const entryNumber = sreState?.entryNumber ?? state.entryNumber;
   const phase = sreState?.phase ?? "IDLE";
@@ -2007,19 +2162,19 @@ function CalcPanel() {
       : phase === "SOROS"
         ? `SOROS Entry ${entryNumber}/2`
         : phase;
+  const isRunning = state.status === "running";
   const meta = state.config.targetProfit;
   const stop = state.config.stopLoss;
-  const isRunning = state.status === "running";
 
   // ── Config form state ──
-  const [cfgStake, setCfgStake] = useState(sreConfig?.initialStake ?? 2);
-  const [cfgPayout, setCfgPayout] = useState(Math.round((sreConfig?.payout ?? 0.87) * 100));
+  const [cfgStake, setCfgStake] = useState(state.config.initialStake);
+  const [cfgPayout, setCfgPayout] = useState(Math.round(state.config.payout * 100));
   const [cfgCustomLevels, setCfgCustomLevels] = useState(
-    sreConfig?.customLevels?.join(", ") ?? "",
+    state.config.customLevels?.join(", ") ?? "",
   );
-  const [cfgMaxLevel, setCfgMaxLevel] = useState(sreConfig?.maxLevel ?? 15);
-  const [cfgStopLoss, setCfgStopLoss] = useState(sreConfig?.stopLoss ?? 100);
-  const [cfgStopWin, setCfgStopWin] = useState(sreConfig?.stopWin ?? 50);
+  const [cfgMaxLevel, setCfgMaxLevel] = useState(state.config.maxLevel);
+  const [cfgStopLoss, setCfgStopLoss] = useState(state.config.stopLoss);
+  const [cfgStopWin, setCfgStopWin] = useState(state.config.targetProfit);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -2033,50 +2188,38 @@ function CalcPanel() {
 
   // Sync form when engine config changes (e.g. on reset)
   useEffect(() => {
-    if (!sreConfig) return;
-    setCfgStake(sreConfig.initialStake);
-    setCfgPayout(Math.round(sreConfig.payout * 100));
-    setCfgCustomLevels(sreConfig.customLevels?.join(", ") ?? "");
-    setCfgMaxLevel(sreConfig.maxLevel);
-    setCfgStopLoss(sreConfig.stopLoss);
-    setCfgStopWin(sreConfig.stopWin);
-  }, [sreConfig?.initialStake, sreConfig?.payout, sreConfig?.maxLevel, sreConfig?.stopLoss, sreConfig?.stopWin]);
+    setCfgStake(state.config.initialStake);
+    setCfgPayout(Math.round(state.config.payout * 100));
+    setCfgCustomLevels(state.config.customLevels?.join(", ") ?? "");
+    setCfgMaxLevel(state.config.maxLevel);
+    setCfgStopLoss(state.config.stopLoss);
+    setCfgStopWin(state.config.targetProfit);
+  }, [state.config.initialStake, state.config.payout, state.config.maxLevel, state.config.stopLoss, state.config.targetProfit]);
 
   const handleSaveConfig = async () => {
-    if (!engine) return;
     setSaving(true);
     setSaved(false);
     try {
       const payoutDecimal = cfgPayout / 100;
 
-      // Parse custom levels
       const customLevels = cfgCustomLevels
         .split(",")
         .map((s) => parseFloat(s.trim()))
         .filter((n) => !isNaN(n) && n > 0);
 
-      // Update SmartRecovery config directly
-      engine.getSmartRecovery().updateConfig({
+      updateConfig({
         initialStake: cfgStake,
         payout: payoutDecimal,
         maxLevel: cfgMaxLevel,
         stopLoss: cfgStopLoss,
-        stopWin: cfgStopWin,
-        customLevels: customLevels.length > 0 ? customLevels : undefined,
+        targetProfit: cfgStopWin,
+        customLevels: customLevels.length > 0 ? customLevels : [],
       });
-
-      // If custom levels provided, also update via engine method
-      if (customLevels.length > 0) {
-        updateCalculatorLevels(customLevels);
-      }
-
-      // Update payout via engine method (syncs with calculator)
-      updateCalculatorPayout(payoutDecimal);
 
       setSaved(true);
       savedTimerRef.current = setTimeout(() => setSaved(false), 2500);
     } catch (e) {
-      console.error("Erro ao salvar config Sorosgale:", e);
+      console.error("Erro ao salvar config:", e);
     } finally {
       setSaving(false);
     }
@@ -2402,12 +2545,13 @@ function FinancePanel() {
   );
 }
 
-function HistoryPanel() {
+function HistoryPanel({ onReplay }: { onReplay: (ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext) => void }) {
   useEffect(() => {
     return () => console.log("[UNMOUNT] HistoryPanel");
   }, []);
   const { state } = useRobot();
   const { getToken } = useBroker();
+  const store = useAnalystStore();
   const [trades, setTrades] = useState<
     Array<{
       id: string;
@@ -2687,7 +2831,7 @@ function HistoryPanel() {
         </div>
       </div>
       {/* Cabeçalho */}
-      <div className="grid grid-cols-7 gap-1 text-[10px] text-muted-foreground tracking-widest px-3 pb-2 border-b border-border">
+      <div className="grid grid-cols-8 gap-1 text-[10px] text-muted-foreground tracking-widest px-3 pb-2 border-b border-border">
         <span>ENTRADA</span>
         <span>FECHAMENTO</span>
         <span>PAR</span>
@@ -2695,6 +2839,7 @@ function HistoryPanel() {
         <span>RESULTADO</span>
         <span className="text-right">VALOR</span>
         <span className="text-right">LUCRO</span>
+        <span className="text-center">REPLAY</span>
       </div>
       <div className="space-y-1 mt-2">
         {allOps.length === 0 && (
@@ -2715,7 +2860,7 @@ function HistoryPanel() {
           return (
             <div
               key={op.id}
-              className={`grid grid-cols-7 gap-1 text-xs items-center rounded px-3 py-2 ${
+              className={`grid grid-cols-8 gap-1 text-xs items-center rounded px-3 py-2 ${
                 isPending
                   ? "bg-warning/5 border border-warning/20"
                   : statusLabel === "WIN"
@@ -2759,6 +2904,26 @@ function HistoryPanel() {
                 className={`text-right font-mono font-semibold ${op.result === "draw" ? "text-muted-foreground" : op.profit >= 0 ? "text-success" : "text-danger"}`}
               >
                 {fmt}
+              </span>
+              <span className="text-center">
+                {!isPending ? (
+                  <button
+                    onClick={() => {
+                      const match = store.replayHistory.find(
+                        (r) => r.operationContext.timestamp === op.openedAt
+                      ) || store.replayContext;
+                      if (match) onReplay(match);
+                    }}
+                    className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-colors ${
+                      store.replayHistory.some((r) => r.operationContext.timestamp === op.openedAt)
+                        ? "bg-primary/10 text-primary hover:bg-primary/20"
+                        : "bg-secondary text-muted-foreground hover:bg-secondary/80"
+                    }`}
+                    title="Assistir replay"
+                  >
+                    ▶
+                  </button>
+                ) : null}
               </span>
             </div>
           );
@@ -2893,7 +3058,7 @@ function NewOperationModal({
 }) {
   const { engine, state: robotState } = useRobot();
   const [remainingTime, setRemainingTime] = useState<number>(0);
-  const countdownInterval = useRef<NodeJS.Timeout | null>(null);
+  const countdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     return () => console.log("[UNMOUNT] NewOperationModal");
@@ -2902,10 +3067,12 @@ function NewOperationModal({
   useEffect(() => {
     if (!activeOperation) return;
 
+    const expirationMs = (activeOperation.expirationSeconds ?? 60) * 1000;
+
     const calculateRemainingTime = () => {
       const openedAt = new Date(activeOperation.openedAt).getTime();
       if (!openedAt) return 0;
-      const endTime = openedAt + 60000;
+      const endTime = openedAt + expirationMs;
       const now = Date.now();
       const remainingMs = Math.max(0, endTime - now);
       return Math.round(remainingMs / 1000);
@@ -2917,7 +3084,7 @@ function NewOperationModal({
       const calculated = calculateRemainingTime();
       setRemainingTime(calculated);
       if (calculated <= 0) {
-        clearInterval(countdownInterval.current);
+        if (countdownInterval.current) clearInterval(countdownInterval.current);
         countdownInterval.current = null;
         onClose();
       }
@@ -2946,7 +3113,7 @@ function NewOperationModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm">
       <div className="panel w-[420px] p-5 shadow-2xl glow-success">
         <div className="flex justify-between items-center mb-4">
-          <h3 className="text-sm font-bold tracking-wide">OPERAÇÃO EM TEMPO REAL</h3>
+          <h3 className="text-sm font-bold tracking-wide">LIVE OPERATION</h3>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X className="size-4" />
           </button>
@@ -2954,7 +3121,7 @@ function NewOperationModal({
 
         <div className="grid grid-cols-3 gap-3 mb-4">
           <div>
-            <div className="text-[10px] text-muted-foreground tracking-widest">ATIVO</div>
+            <div className="text-[10px] text-muted-foreground tracking-widest">ASSET</div>
             <div className="text-sm font-bold mt-1">
               🇪🇺 {activeOperation.asset} <span className="text-success text-[10px]">OTC</span>
             </div>
@@ -2970,7 +3137,7 @@ function NewOperationModal({
                     : "text-sm font-bold text-danger mt-1"
               }
             >
-              {isSuccessful ? "GANHOU" : isActive ? "ABERTO" : "PENDENTE"}
+              {isSuccessful ? "WON" : isActive ? "OPEN" : "PENDING"}
             </div>
             <div className="flex gap-1 mt-1">
               {isSuccessful ? (
@@ -2996,7 +3163,7 @@ function NewOperationModal({
           </div>
           <div>
             <div className="text-[10px] text-muted-foreground tracking-widest">
-              VALOR DA ENTRADA
+              ENTRY AMOUNT
             </div>
             <div className="text-sm font-bold mt-1">
               R${(activeOperation.amount || 0).toFixed(2)}
@@ -3007,7 +3174,7 @@ function NewOperationModal({
         <div className="grid grid-cols-2 gap-4 items-center mb-4">
           <div className="space-y-3">
             <div>
-              <div className="text-[10px] text-muted-foreground tracking-widest">DIREÇÃO</div>
+              <div className="text-[10px] text-muted-foreground tracking-widest">DIRECTION</div>
               <div
                 className="text-sm font-bold flex items-center gap-1 mt-1"
                 style={{
@@ -3025,16 +3192,18 @@ function NewOperationModal({
             <div>
               <div className="text-[10px] text-muted-foreground tracking-widest">TIMEFRAME</div>
               <div className="text-sm font-bold mt-1">
-                {robotState.selectedTimeframe || robotState.config.timeframes[0] || "M1"}
+                {activeOperation.timeframe || robotState.selectedTimeframe || robotState.config.timeframes[0] || "M1"}
               </div>
             </div>
             <div>
               <div className="text-[10px] text-muted-foreground tracking-widest">EXPIRAÇÃO</div>
               <div className="text-sm font-bold mt-1">
-                {robotState.config.timeframes.includes("M5") ||
-                robotState.config.timeframes.includes("M1")
-                  ? "1 MINUTO"
-                  : "5 MINUTOS"}
+                {(() => {
+                  const expSec = activeOperation.expirationSeconds ?? 60;
+                  if (expSec <= 60) return "1 MINUTO";
+                  if (expSec <= 300) return "5 MINUTOS";
+                  return "15 MINUTOS";
+                })()}
               </div>
             </div>
           </div>
@@ -3081,7 +3250,7 @@ function NewOperationModal({
           <div className="panel p-2 text-center">
             <div className="text-[10px] text-muted-foreground tracking-widest">PAYOUT</div>
             <div className="text-success font-bold">
-              {(engine?.getSmartRecovery()?.getConfig()?.payout ?? 0.85) * 100}%
+              {Math.round((robotState.config.payout ?? 0.85) * 100)}%
             </div>
           </div>
           <div className="panel p-2 text-center">
@@ -3102,18 +3271,16 @@ function NewOperationModal({
               className="font-bold mt-1"
               style={{
                 color:
-                  (engine?.getSmartRecovery()?.getState()?.currentLevel ??
-                    activeOperation.recoveryStep) <
-                  (engine?.getSmartRecovery()?.getConfig()?.maxLevel ?? 15) / 2
+                  (robotState.currentRecoveryStep ?? activeOperation.recoveryStep) <
+                  (robotState.config.maxLevel ?? 15) / 2
                     ? "var(--success)"
-                    : (engine?.getSmartRecovery()?.getState()?.currentLevel ??
-                          activeOperation.recoveryStep) <
-                        (engine?.getSmartRecovery()?.getConfig()?.maxLevel ?? 15) * 0.75
+                    : (robotState.currentRecoveryStep ?? activeOperation.recoveryStep) <
+                        (robotState.config.maxLevel ?? 15) * 0.75
                       ? "var(--warning)"
                       : "var(--danger)",
               }}
             >
-              {engine?.getSmartRecovery()?.getState()?.currentLevel ?? activeOperation.recoveryStep}
+              {robotState.currentRecoveryStep ?? activeOperation.recoveryStep}
             </div>
           </div>
           <div>
@@ -3128,8 +3295,8 @@ function NewOperationModal({
                     : "var(--success)",
               }}
             >
-              {engine?.getSmartRecovery()?.getState()?.entryNumber ?? activeOperation.entryNumber}/
-              {engine?.getSmartRecovery()?.getConfig()?.maxLevel ?? 15}
+              {robotState.entryNumber ?? activeOperation.entryNumber}/
+              {robotState.config.maxLevel ?? 15}
             </div>
           </div>
           <div>

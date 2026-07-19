@@ -20,6 +20,11 @@ import type {
   ScoreBand,
   ScanLogEntry,
 } from "./AnalystTypes";
+import type { DecisionContext as DecisionContextType } from "../flow-continuity/types/decision-context.types";
+import type { OperationContext as OperationContextType } from "../flow-continuity/types/operation-context.types";
+import type { ReplayContext as ReplayContextType } from "../flow-continuity/types/replay-context.types";
+import type { PerformanceContext as PerformanceContextType } from "../performance/types/performance-context.types";
+import type { AdvisorContext as AdvisorContextType } from "../advisor/types/advisor-context.types";
 import { resolveAnalystMessage } from "./AnalystEvents";
 import { DEFAULT_DIAGNOSTIC } from "./AnalystTypes";
 
@@ -48,6 +53,24 @@ export interface AnalystStore {
   scoreEvolution: ScoreEvolutionEntry[];
   // ── Scan Log ──
   scanLog: ScanLogEntry[];
+  // ── Decision Context ──
+  decisionContext: DecisionContextType | null;
+  decisionHistory: DecisionContextType[];
+  setDecisionContext: (ctx: DecisionContextType) => void;
+  // ── Operation Context ──
+  operationContext: OperationContextType | null;
+  operationHistory: OperationContextType[];
+  setOperationContext: (ctx: OperationContextType) => void;
+  // ── Replay Context ──
+  replayContext: ReplayContextType | null;
+  replayHistory: ReplayContextType[];
+  setReplayContext: (ctx: ReplayContextType) => void;
+  // ── Performance Context ──
+  performanceContext: PerformanceContextType | null;
+  setPerformanceContext: (ctx: PerformanceContextType) => void;
+  // ── Advisor Context ──
+  advisorContext: AdvisorContextType | null;
+  setAdvisorContext: (ctx: AdvisorContextType) => void;
   setScanLog: (entries: ScanLogEntry[]) => void;
   addMessage: (type: AnalystEventType, meta?: Record<string, unknown>) => void;
   setStatus: (status: AnalystAIState) => void;
@@ -128,6 +151,14 @@ export function useAnalystStore(): AnalystStore {
   const [scoreBreakdown, setScoreBreakdownState] = useState<ScoreBreakdownDisplay | null>(null);
   const [scoreEvolution, setScoreEvolution] = useState<ScoreEvolutionEntry[]>([]);
   const [scanLog, setScanLogState] = useState<ScanLogEntry[]>([]);
+  const [decisionContext, setDecisionContextState] = useState<DecisionContextType | null>(null);
+  const [decisionHistory, setDecisionHistoryState] = useState<DecisionContextType[]>([]);
+  const [operationContext, setOperationContextState] = useState<OperationContextType | null>(null);
+  const [operationHistory, setOperationHistoryState] = useState<OperationContextType[]>([]);
+  const [replayContext, setReplayContextState] = useState<ReplayContextType | null>(null);
+  const [replayHistory, setReplayHistoryState] = useState<ReplayContextType[]>([]);
+  const [performanceContext, setPerformanceContextState] = useState<PerformanceContextType | null>(null);
+  const [advisorContext, setAdvisorContextState] = useState<AdvisorContextType | null>(null);
   const messagesRef = useRef<AnalystMessage[]>([]);
   const reasoningRef = useRef<AnalystReasoningItem[]>([]);
   const diaryRef = useRef<DiaryEntry[]>([]);
@@ -197,6 +228,29 @@ export function useAnalystStore(): AnalystStore {
 
   const setScanLog = useCallback((entries: ScanLogEntry[]) => {
     setScanLogState([...entries]);
+  }, []);
+
+  const setDecisionContext = useCallback((ctx: DecisionContextType) => {
+    setDecisionContextState(ctx);
+    setDecisionHistoryState((prev) => [ctx, ...prev].slice(0, 20));
+  }, []);
+
+  const setOperationContext = useCallback((ctx: OperationContextType) => {
+    setOperationContextState(ctx);
+    setOperationHistoryState((prev) => [ctx, ...prev].slice(0, 100));
+  }, []);
+
+  const setReplayContext = useCallback((ctx: ReplayContextType) => {
+    setReplayContextState(ctx);
+    setReplayHistoryState((prev) => [ctx, ...prev].slice(0, 100));
+  }, []);
+
+  const setPerformanceContext = useCallback((ctx: PerformanceContextType) => {
+    setPerformanceContextState(ctx);
+  }, []);
+
+  const setAdvisorContext = useCallback((ctx: AdvisorContextType) => {
+    setAdvisorContextState(ctx);
   }, []);
 
   const updateStats = useCallback((partial: Partial<AnalystStats>) => {
@@ -312,6 +366,19 @@ export function useAnalystStore(): AnalystStore {
       scoreEvolution,
       scanLog,
       setScanLog,
+      decisionContext,
+      decisionHistory,
+      setDecisionContext,
+      operationContext,
+      operationHistory,
+      setOperationContext,
+      replayContext,
+      replayHistory,
+      setReplayContext,
+      performanceContext,
+      setPerformanceContext,
+      advisorContext,
+      setAdvisorContext,
       addMessage,
       setStatus,
       setMode,
@@ -352,6 +419,14 @@ export function useAnalystStore(): AnalystStore {
       scoreBreakdown,
       scoreEvolution,
       scanLog,
+      decisionContext,
+      decisionHistory,
+      operationContext,
+      operationHistory,
+      replayContext,
+      replayHistory,
+      performanceContext,
+      advisorContext,
     ],
   );
 }

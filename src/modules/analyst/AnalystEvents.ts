@@ -452,6 +452,66 @@ export const ANALYST_EVENT_MAP: Record<AnalystEventType, AnalystEventDef> = {
     text: (m) => `IA bloqueou entrada: ${String(m?.action ?? "")} — ${String(m?.reason ?? "")}`,
     icon: "⛔",
   },
+  "decision.context": {
+    level: "info",
+    mode: "explanatory",
+    text: (m) => {
+      const decision = String(m?.decision ?? "UNKNOWN");
+      const score = Number(m?.finalScore ?? 0);
+      const reason = String(m?.decisionReason ?? "");
+      return `Decision: ${decision} (${score}/100) — ${reason}`;
+    },
+    icon: "🧠",
+  },
+  "operation.context": {
+    level: "info",
+    mode: "explanatory",
+    text: (m) => {
+      const status = String(m?.status ?? "UNKNOWN");
+      const direction = String(m?.direction ?? "");
+      const profit = Number(m?.profit ?? 0);
+      const asset = String(m?.asset ?? "");
+      const label = status === "WIN" ? "WIN" : status === "LOSS" ? "LOSS" : status === "DRAW" ? "DRAW" : status;
+      return `Operation ${label}: ${direction.toUpperCase()} ${asset} — ${profit >= 0 ? "+" : ""}${profit.toFixed(2)}`;
+    },
+    icon: "📊",
+  },
+  "replay.context": {
+    level: "info",
+    mode: "explanatory",
+    text: (m) => {
+      const result = String(m?.result ?? "UNKNOWN");
+      const asset = String(m?.asset ?? "");
+      const score = Number(m?.score ?? 0);
+      const duration = Number(m?.durationMs ?? 0);
+      const label = result === "WIN" ? "WIN" : result === "LOSS" ? "LOSS" : result === "BREAKEVEN" ? "EMPATE" : "EM ABERTO";
+      return `Replay: ${label} — ${asset} — Score: ${score}/100 — Duração: ${(duration / 1000).toFixed(0)}s`;
+    },
+    icon: "🎬",
+  },
+  "performance.context": {
+    level: "info",
+    mode: "developer",
+    text: (m) => {
+      const winRate = Number(m?.winRate ?? 0);
+      const totalTrades = Number(m?.totalTrades ?? 0);
+      const netProfit = Number(m?.netProfit ?? 0);
+      const healthScore = Number(m?.healthScore ?? 0);
+      return `Performance atualizada: ${winRate}% WR, ${totalTrades} trades, R$ ${netProfit.toFixed(2)}, Saúde: ${healthScore}/100`;
+    },
+    icon: "📊",
+  },
+  "advisor.context": {
+    level: "info",
+    mode: "developer",
+    text: (m) => {
+      const status = String(m?.overallStatus ?? "UNKNOWN");
+      const recs = Array.isArray(m?.recommendations) ? m.recommendations.length : 0;
+      const alerts = Array.isArray(m?.alerts) ? m.alerts.length : 0;
+      return `Advisor: ${status} — ${recs} recomendações, ${alerts} alertas`;
+    },
+    icon: "🧠",
+  },
   "system.info": {
     level: "info",
     mode: "developer",

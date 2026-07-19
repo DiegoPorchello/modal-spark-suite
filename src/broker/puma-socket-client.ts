@@ -530,7 +530,7 @@ export class PumaSocketClient {
     console.log("║  symbol:", String(data.symbol ?? "").padEnd(52), "║");
     console.log("╚═══════════════════════════════════════════════════════════════╝");
     console.log("[DEBUG-TRADE] 📊 tradeUpdate RAW payload:", JSON.stringify(data, null, 2));
-    console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol, tradeStatus: data.trade?.status });
+    console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol, tradeStatus: tradeObj?.status });
 
     engineLogger.info("PumaSocketClient", "📊 tradeUpdate recebido", {
       tradeId,

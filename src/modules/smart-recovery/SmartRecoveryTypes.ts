@@ -15,9 +15,9 @@ export interface SorosGaleConfig {
 export const DEFAULT_SOROS_CONFIG: SorosGaleConfig = {
   bankroll: 1000,
   initialStake: 2,
-  payout: 0.87,
-  stopLoss: 100,
-  stopWin: 50,
+  payout: 0.86,
+  stopLoss: 200,
+  stopWin: 100,
   maxLevel: 15,
 };
 

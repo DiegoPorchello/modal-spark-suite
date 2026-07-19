@@ -59,6 +59,11 @@ export type AnalystEventType =
   | "scanLog.update"
   | "ai.decision"
   | "ai.blocked-entry"
+  | "decision.context"
+  | "operation.context"
+  | "replay.context"
+  | "performance.context"
+  | "advisor.context"
   | "system.info";
 
 export type AnalystMessageLevel = "success" | "info" | "warning" | "error";

@@ -19,6 +19,7 @@ import {
   type TickData,
   type CandleData,
   type TradeUpdateData,
+  type TradeResultData,
 } from "../broker/puma-socket-client";
 
 export type {

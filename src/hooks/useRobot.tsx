@@ -78,6 +78,26 @@ export function RobotProvider({ children }: { children: ReactNode }) {
       engineRef.current = new FlowRobotEngine(adapter);
       setEngine(engineRef.current);
       setState(engineRef.current.state);
+
+      // Listening for the "operation-opened" event from the engine
+      const unsub = engineRef.current.on((event) => {
+        if (event.operation) {
+          const op = event.operation;
+          setState((prev) => {
+            const exists = prev.operations.some((item) => item.orderId === op.orderId);
+            if (exists) return prev;
+
+            return {
+              ...prev,
+              activeOperation: op,
+              status: "waiting-result",
+              operations: [op, ...prev.operations],
+            };
+          });
+        }
+      });
+
+      return () => unsub();
     }
   }, [adapter]);
 

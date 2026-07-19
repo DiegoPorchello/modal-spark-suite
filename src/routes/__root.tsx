@@ -13,6 +13,8 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { BrokerProvider } from "../hooks/useBroker";
 import { RobotProvider } from "../hooks/useRobot";
+import { PerformanceProvider } from "../hooks/usePerformance";
+import { MarketContextProvider } from "../contexts/MarketContext";
 import { connectLoggerToDaemon } from "../engine/logger";
 
 /**
@@ -205,12 +207,16 @@ function RootComponent() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrokerProvider>
-        <RobotProvider>
-          <ErrorBoundary>
-            {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-            <Outlet />
-          </ErrorBoundary>
-        </RobotProvider>
+        <MarketContextProvider>
+          <RobotProvider>
+            <PerformanceProvider>
+              <ErrorBoundary>
+                {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+                <Outlet />
+              </ErrorBoundary>
+            </PerformanceProvider>
+          </RobotProvider>
+        </MarketContextProvider>
       </BrokerProvider>
     </QueryClientProvider>
   );
