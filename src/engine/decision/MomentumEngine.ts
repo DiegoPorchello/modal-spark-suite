@@ -220,7 +220,7 @@ export class MomentumEngine {
   }
 
   private calcADX(candles: Candle[], period: number): number {
-    if (candles.length < period * 2) return 0;
+    if (!candles || candles.length < period * 2) return 0;
     const trs: number[] = [];
     const plusDMs: number[] = [];
     const minusDMs: number[] = [];
@@ -230,6 +230,8 @@ export class MomentumEngine {
       const low = candles[i].low;
       const prevLow = candles[i - 1].low;
       const prevClose = candles[i - 1].close;
+      if (high == null || low == null || prevHigh == null || prevLow == null || prevClose == null) continue;
+      if (isNaN(high) || isNaN(low) || isNaN(prevHigh) || isNaN(prevLow) || isNaN(prevClose)) continue;
       const tr = Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
       trs.push(tr);
       const plusDM = high - prevHigh > prevLow - low ? Math.max(high - prevHigh, 0) : 0;
@@ -237,6 +239,7 @@ export class MomentumEngine {
       plusDMs.push(plusDM);
       minusDMs.push(minusDM);
     }
+    if (trs.length < period * 2) return 0;
     let atr = trs.slice(0, period).reduce((s, v) => s + v, 0) / period;
     let plusDM = plusDMs.slice(0, period).reduce((s, v) => s + v, 0) / period;
     let minusDM = minusDMs.slice(0, period).reduce((s, v) => s + v, 0) / period;
@@ -259,14 +262,17 @@ export class MomentumEngine {
   }
 
   private calcATR(candles: Candle[], period: number): number {
-    if (candles.length < period + 1) return 0;
+    if (!candles || candles.length < period + 1) return 0;
     const trs: number[] = [];
     for (let i = 1; i < candles.length; i++) {
       const h = candles[i].high;
       const l = candles[i].low;
       const pc = candles[i - 1].close;
+      if (h == null || l == null || pc == null) continue;
+      if (isNaN(h) || isNaN(l) || isNaN(pc)) continue;
       trs.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
     }
+    if (trs.length < period) return 0;
     let atr = trs.slice(0, period).reduce((s, v) => s + v, 0) / period;
     for (let i = period; i < trs.length; i++) {
       atr = (atr * (period - 1) + trs[i]) / period;

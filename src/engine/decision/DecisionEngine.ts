@@ -17,11 +17,29 @@ import { StructureEngine, type StructureResult } from "./StructureEngine";
 import { PriceActionEngine, type PriceActionResult } from "./PriceActionEngine";
 import { SmartMoneyEngine, type SmartMoneyResult } from "./SmartMoneyEngine";
 import { MomentumEngine, type MomentumResult } from "./MomentumEngine";
-import { ScoreEngine, type ScoreBreakdownResult, type ScoreFilterItem } from "./ScoreEngine";
+import {
+  ScoreEngine,
+  type ScoreBreakdownResult,
+  type ScoreFilterItem,
+  type ScoreBand,
+} from "./ScoreEngine";
 import { MicroReversalEngine, type MicroReversalResult } from "./MicroReversalEngine";
+import {
+  HybridProbabilityEngine,
+  HybridProbabilityEngineV2,
+  type HybridProbabilityConfig,
+  type HybridProbabilityResult,
+} from "./HybridProbabilityEngine";
 import { engineLogger } from "../logger";
+import { DirectionScoreAudit } from "./DirectionScoreAudit";
 
 export type DecisionDirection = "CALL" | "PUT" | null;
+
+export interface DecisionAnalyzeOptions {
+  operationProfile?: "AUTO" | "FOREX" | "HYBRID_FLOW" | "HYBRID_PROBABILITY";
+  hybridProbabilityConfig?: HybridProbabilityConfig;
+  timeframe?: string;
+}
 
 export type BlockedRule =
   | "INSUFFICIENT_DATA"
@@ -139,6 +157,20 @@ export interface DecisionResult {
   // ── Debug mode data ──
   debugData?: DebugData;
 
+  // ── Hybrid Probability (perfil operacional independente) ──
+  hybridProbability?: HybridProbabilityResult;
+
+  // ── Stage timing (ms) ──
+  stageTimings?: {
+    trend: number;
+    structure: number;
+    priceAction: number;
+    smartMoney: number;
+    momentum: number;
+    score: number;
+    total: number;
+  };
+
   // ── Legacy compatibility (for FlowRobotEngine) ──
   probability: {
     total: number;
@@ -169,6 +201,7 @@ export class DecisionEngine {
   private momentumEngine = new MomentumEngine();
   private scoreEngine = new ScoreEngine();
   private microReversalEngine = new MicroReversalEngine();
+  private hybridProbabilityEngine = new HybridProbabilityEngineV2();
   microReversalEnabled = false;
 
   private history: DecisionResult[] = [];
@@ -199,8 +232,25 @@ export class DecisionEngine {
     );
   }
 
-  analyze(candles: Candle[], asset: string): DecisionResult {
+  getAuditReport() {
+    return DirectionScoreAudit.generateReport();
+  }
+
+  clearAudit() {
+    DirectionScoreAudit.clear();
+  }
+
+  analyze(candles: Candle[], asset: string, options?: DecisionAnalyzeOptions): DecisionResult {
     const timestamp = new Date();
+    const t0 = performance.now();
+    console.log(`[AUDIT] [DECISION_START] local=${timestamp.toISOString()} asset=${asset} perf=${t0}`);
+    console.log(
+      `[TIMING] DECISION_ENGINE_START asset=${asset} candleCount=${candles.length} tf=${options?.timeframe ?? "none"} tsDate=${Date.now()} tsPerf=${t0.toFixed(2)}`
+    );
+
+    console.log(
+      `[FLOW DIAG] ${timestamp.toLocaleTimeString("pt-BR")} ═══ DecisionEngine.analyze() INÍCIO ═══ asset=${asset} candles=${candles.length} profile=${options?.operationProfile} tf=${options?.timeframe}`,
+    );
 
     // ══ ETAPA 1: Recebeu candles? ══
     engineLogger.info("DecisionEngine", `═══ DIAGNÓSTICO ${asset} ═══`, {
@@ -231,6 +281,20 @@ export class DecisionEngine {
       closed: closedCandles.length,
       dropped_open: candles.length - closedCandles.length,
     });
+
+    // ── HYBRID PROBABILITY: perfil operacional independente ──
+    console.log(
+      `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ DecisionEngine branch check ═══ profile=${options?.operationProfile} isHP=${options?.operationProfile === "HYBRID_PROBABILITY"}`,
+    );
+    if (options?.operationProfile === "HYBRID_PROBABILITY") {
+      return this.analyzeHybridProbability(
+        closedCandles,
+        asset,
+        options.hybridProbabilityConfig,
+        options.timeframe ?? "M1",
+        timestamp,
+      );
+    }
 
     const HYBRID_PUMA_ASSETS = new Set([
       "BETHUSDT",
@@ -263,7 +327,9 @@ export class DecisionEngine {
     );
 
     // Run all engines
+    const tTrend0 = performance.now();
     const trend = this.trendEngine.analyze(closedCandles);
+    const msTrend = performance.now() - tTrend0;
     engineLogger.info("DecisionEngine", `ETAPA 2: TrendEngine`, {
       direction: trend.direction,
       score: `${trend.score}/20`,
@@ -276,7 +342,9 @@ export class DecisionEngine {
       details: trend.details,
     });
 
+    const tStructure0 = performance.now();
     const structure = this.structureEngine.analyze(closedCandles);
+    const msStructure = performance.now() - tStructure0;
     engineLogger.info("DecisionEngine", `ETAPA 2: StructureEngine`, {
       score: `${structure.score}/15`,
       support: structure.support.toFixed(4),
@@ -288,7 +356,9 @@ export class DecisionEngine {
       details: structure.details,
     });
 
+    const tPriceAction0 = performance.now();
     const priceAction = this.priceActionEngine.analyze(closedCandles);
+    const msPriceAction = performance.now() - tPriceAction0;
     engineLogger.info("DecisionEngine", `ETAPA 2: PriceActionEngine`, {
       score: `${priceAction.score}/15`,
       pattern: priceAction.pattern ?? "none",
@@ -301,7 +371,9 @@ export class DecisionEngine {
       details: priceAction.details,
     });
 
+    const tSmartMoney0 = performance.now();
     const smartMoney = this.smartMoneyEngine.analyze(closedCandles);
+    const msSmartMoney = performance.now() - tSmartMoney0;
     engineLogger.info("DecisionEngine", `ETAPA 2: SmartMoneyEngine`, {
       score: `${smartMoney.score}/10`,
       obCount: smartMoney.orderBlocks.length,
@@ -315,7 +387,9 @@ export class DecisionEngine {
       details: smartMoney.details,
     });
 
+    const tMomentum0 = performance.now();
     const momentum = this.momentumEngine.analyze(closedCandles);
+    const msMomentum = performance.now() - tMomentum0;
     engineLogger.info("DecisionEngine", `ETAPA 2: MomentumEngine`, {
       score: `${momentum.score}/15`,
       rsi: momentum.rsi.toFixed(1),
@@ -335,6 +409,7 @@ export class DecisionEngine {
     const lastPrice = closedCandles[closedCandles.length - 1].close;
 
     // ══ ETAPA 3: Score Engine (substitui lógica AND) ══
+    const tScore0 = performance.now();
     const scoreBreakdown = this.scoreEngine.calculate(
       trend,
       structure,
@@ -342,6 +417,8 @@ export class DecisionEngine {
       smartMoney,
       momentum,
     );
+    const msScore = performance.now() - tScore0;
+    const msTotal = performance.now() - t0;
 
     engineLogger.info("DecisionEngine", `═══ ETAPA 3: SCORE ENGINE ═══`, {
       total: `${scoreBreakdown.total}/100`,
@@ -379,11 +456,51 @@ export class DecisionEngine {
         minScore,
         isCrypto,
       });
+
+      // ══ AUDITORIA: Registrar bloqueio por LOW_SCORE ══
+      DirectionScoreAudit.record({
+        timestamp: Date.now(),
+        asset,
+        timeframe: options?.timeframe ?? "M1",
+        scoreTotal: scoreBreakdown.total,
+        band: scoreBreakdown.bandLabel,
+        trendScore: trend.score,
+        trendDirection: trend.direction,
+        structureScore: structure.score,
+        priceActionScore: priceAction.score,
+        smartMoneyScore: smartMoney.score,
+        momentumScore: momentum.score,
+        callScore: 0,
+        putScore: 0,
+        minDirection: minDirectionScore,
+        result: "LOW_SCORE",
+        blockedReason,
+      });
     } else if (trend.direction === "SIDEWAYS" && scoreBreakdown.total < sidewaysMinScore) {
       // Mercado lateral SÓ bloqueia se score < threshold
       blockedReason = `Mercado lateral (SIDEWAYS) — score insuficiente (${scoreBreakdown.total} < ${sidewaysMinScore}${isCrypto ? " crypto" : ""})`;
       blockedRule = "SIDEWAYS_MARKET";
       engineLogger.warn("DecisionEngine", `❌ ETAPA 4: RECUSADO — ${blockedReason}`);
+
+      // ══ AUDITORIA: Registrar bloqueio por SIDEWAYS_MARKET ══
+      DirectionScoreAudit.record({
+        timestamp: Date.now(),
+        asset,
+        timeframe: options?.timeframe ?? "M1",
+        scoreTotal: scoreBreakdown.total,
+        band: scoreBreakdown.bandLabel,
+        trendScore: trend.score,
+        trendDirection: trend.direction,
+        structureScore: structure.score,
+        priceActionScore: priceAction.score,
+        smartMoneyScore: smartMoney.score,
+        momentumScore: momentum.score,
+        callScore: 0,
+        putScore: 0,
+        minDirection: minDirectionScore,
+        result: "SIDEWAYS_MARKET",
+        blockedReason,
+      });
     } else {
       // Score >= minScore: determinar direção
       const callScore = this.calcDirectionScore(
@@ -408,6 +525,33 @@ export class DecisionEngine {
         putScore,
         minRequired: minDirectionScore,
         isCrypto,
+      });
+
+      // ══ AUDITORIA: Registrar entrada para análise estatística ══
+      let auditResult: "CALL" | "PUT" | "NO_CLEAR_DIRECTION" = "NO_CLEAR_DIRECTION";
+      if (callScore > putScore && callScore >= minDirectionScore) {
+        auditResult = "CALL";
+      } else if (putScore > callScore && putScore >= minDirectionScore) {
+        auditResult = "PUT";
+      }
+
+      DirectionScoreAudit.record({
+        timestamp: Date.now(),
+        asset,
+        timeframe: options?.timeframe ?? "M1",
+        scoreTotal: scoreBreakdown.total,
+        band: scoreBreakdown.bandLabel,
+        trendScore: trend.score,
+        trendDirection: trend.direction,
+        structureScore: structure.score,
+        priceActionScore: priceAction.score,
+        smartMoneyScore: smartMoney.score,
+        momentumScore: momentum.score,
+        callScore,
+        putScore,
+        minDirection: minDirectionScore,
+        result: auditResult,
+        blockedReason: null,
       });
 
       // Direção precisa de pelo menos X pts (mais rigoroso para crypto)
@@ -453,6 +597,26 @@ export class DecisionEngine {
         probability: microReversal.probability,
         threshold: MicroReversalEngine.BLOCK_THRESHOLD,
       });
+
+      // ══ AUDITORIA: Registrar bloqueio por MICRO_REVERSAL ══
+      DirectionScoreAudit.record({
+        timestamp: Date.now(),
+        asset,
+        timeframe: options?.timeframe ?? "M1",
+        scoreTotal: scoreBreakdown.total,
+        band: scoreBreakdown.bandLabel,
+        trendScore: trend.score,
+        trendDirection: trend.direction,
+        structureScore: structure.score,
+        priceActionScore: priceAction.score,
+        smartMoneyScore: smartMoney.score,
+        momentumScore: momentum.score,
+        callScore: 0,
+        putScore: 0,
+        minDirection: minDirectionScore,
+        result: "MICRO_REVERSAL",
+        blockedReason,
+      });
     } else if (direction) {
       engineLogger.info(
         "DecisionEngine",
@@ -466,6 +630,26 @@ export class DecisionEngine {
       blockedRule = "STRONG_TREND_VETO";
       direction = null;
       engineLogger.warn("DecisionEngine", `❌ ETAPA 4C: BLOQUEADO — ${blockedReason}`);
+
+      // ══ AUDITORIA: Registrar bloqueio por TREND_VETO ══
+      DirectionScoreAudit.record({
+        timestamp: Date.now(),
+        asset,
+        timeframe: options?.timeframe ?? "M1",
+        scoreTotal: scoreBreakdown.total,
+        band: scoreBreakdown.bandLabel,
+        trendScore: trend.score,
+        trendDirection: trend.direction,
+        structureScore: structure.score,
+        priceActionScore: priceAction.score,
+        smartMoneyScore: smartMoney.score,
+        momentumScore: momentum.score,
+        callScore: 0,
+        putScore: 0,
+        minDirection: minDirectionScore,
+        result: "TREND_VETO",
+        blockedReason,
+      });
     } else if (direction) {
       engineLogger.info("DecisionEngine", `✅ ETAPA 4C: Trend liberado (${trend.score}/20 >= 8)`);
     }
@@ -476,6 +660,26 @@ export class DecisionEngine {
       blockedRule = "STRONG_MOMENTUM_VETO";
       direction = null;
       engineLogger.warn("DecisionEngine", `❌ ETAPA 4D: BLOQUEADO — ${blockedReason}`);
+
+      // ══ AUDITORIA: Registrar bloqueio por MOMENTUM_VETO ══
+      DirectionScoreAudit.record({
+        timestamp: Date.now(),
+        asset,
+        timeframe: options?.timeframe ?? "M1",
+        scoreTotal: scoreBreakdown.total,
+        band: scoreBreakdown.bandLabel,
+        trendScore: trend.score,
+        trendDirection: trend.direction,
+        structureScore: structure.score,
+        priceActionScore: priceAction.score,
+        smartMoneyScore: smartMoney.score,
+        momentumScore: momentum.score,
+        callScore: 0,
+        putScore: 0,
+        minDirection: minDirectionScore,
+        result: "MOMENTUM_VETO",
+        blockedReason,
+      });
     } else if (direction) {
       engineLogger.info(
         "DecisionEngine",
@@ -552,6 +756,15 @@ export class DecisionEngine {
       log,
       blockedReason,
       blockedRule,
+      stageTimings: {
+        trend: msTrend,
+        structure: msStructure,
+        priceAction: msPriceAction,
+        smartMoney: msSmartMoney,
+        momentum: msMomentum,
+        score: msScore,
+        total: msTotal,
+      },
       // ── Backward-compatible fields ──
       filters: this.buildFiltersFromScore(scoreBreakdown, microReversal),
       score: this.buildScoreBreakdown(scoreBreakdown),
@@ -580,6 +793,21 @@ export class DecisionEngine {
 
     this.history.push(result);
     if (this.history.length > 500) this.history = this.history.slice(-500);
+
+    const t1 = performance.now();
+    console.log(`[AUDIT] [DECISION_END] asset=${asset} perf=${t1} duration=${(t1 - t0).toFixed(2)}ms`);
+    console.log(
+      `[TIMING] DECISION_ENGINE_END asset=${asset} direction=${result.direction} score=${result.score} blockedReason=${result.blockedReason ?? "none"} durationMs=${(t1 - t0).toFixed(2)} tsDate=${Date.now()} tsPerf=${t1.toFixed(2)}`
+    );
+    engineLogger.info("DecisionEngine", `[STAGE TIMING] ${asset}`, {
+      trend: `${msTrend.toFixed(1)}ms`,
+      structure: `${msStructure.toFixed(1)}ms`,
+      priceAction: `${msPriceAction.toFixed(1)}ms`,
+      smartMoney: `${msSmartMoney.toFixed(1)}ms`,
+      momentum: `${msMomentum.toFixed(1)}ms`,
+      score: `${msScore.toFixed(1)}ms`,
+      total: `${msTotal.toFixed(1)}ms`,
+    });
 
     return result;
   }
@@ -703,6 +931,66 @@ export class DecisionEngine {
     lines.push(`═══════════════════════════════════════`);
 
     return lines.join("\n");
+  }
+
+  private analyzeHybridProbability(
+    closedCandles: Candle[],
+    asset: string,
+    config: HybridProbabilityConfig | undefined,
+    timeframe: string,
+    timestamp: Date,
+  ): DecisionResult {
+    console.log(
+      `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ analyzeHybridProbability chamado ═══ asset=${asset} tf=${timeframe} candles=${closedCandles.length} configDefined=${!!config}`,
+    );
+    const hp = this.hybridProbabilityEngine.analyze(closedCandles, asset, timeframe, config);
+    console.log(
+      `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ HybridProbabilityEngine.analyze() RETORNOU ═══ status=${hp.status} score=${hp.score} direction=${hp.direction} blockedReasons=${hp.blockedReasons.length} processingMs=${hp.processingTimeMs}`,
+    );
+    const base = this.buildBlocked(
+      hp.status === "bloqueado" ? hp.blockedReasons.join(" | ") : "Hybrid Probability — sem sinal",
+      hp.status === "bloqueado" ? "LOW_SCORE" : null,
+      asset,
+      timestamp,
+      closedCandles,
+    );
+
+    const band = this.mapLevelToBand(hp.level);
+
+    return {
+      ...base,
+      direction: hp.direction,
+      blockedReason: hp.status === "bloqueado" ? hp.blockedReasons.join(" | ") : null,
+      blockedRule: hp.status === "bloqueado" ? "LOW_SCORE" : null,
+      scoreBreakdown: { ...base.scoreBreakdown, total: hp.score, band, bandLabel: hp.level },
+      score: { ...base.score, total: hp.score },
+      filters: [
+        ...base.filters,
+        ...hp.filters.map((f) => ({ name: f.name, passed: f.passed, detail: f.detail })),
+      ],
+      debugData: {
+        ...base.debugData,
+        adx: hp.indicators.adx,
+        atr: hp.indicators.atr,
+        trendDirection: hp.direction ?? "SIDEWAYS",
+        totalScore: hp.score,
+        canOperate: hp.status === "liberado",
+        direction: hp.direction,
+      } as DebugData,
+      hybridProbability: hp,
+    };
+  }
+
+  private mapLevelToBand(level: HybridProbabilityResult["level"]): ScoreBand {
+    switch (level) {
+      case "Excelente":
+      case "Forte":
+        return "ENTRADA_FORTE";
+      case "Boa":
+        return "ENTRADA_PERMITIDA";
+      default:
+        return "NAO_OPERAR";
+    }
   }
 
   private buildBlocked(

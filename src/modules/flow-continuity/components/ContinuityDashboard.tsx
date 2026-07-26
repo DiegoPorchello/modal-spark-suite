@@ -39,10 +39,10 @@ export const ContinuityDashboard: React.FC = () => {
 
   const getRobotStatusColor = () => {
     switch (state.status) {
-      case "running": return "bg-green-500/20 text-green-400 border-green-500/40";
-      case "paused": return "bg-yellow-500/20 text-yellow-400 border-yellow-500/40";
+      case "running": return "bg-success/20 text-success border-success/40";
+      case "paused": return "bg-warning/20 text-warning border-warning/40";
       case "stopped": return "bg-gray-500/20 text-gray-400 border-gray-500/40";
-      default: return "bg-blue-500/20 text-blue-400 border-blue-500/40";
+      default: return "bg-info/20 text-info border-info/40";
     }
   };
 
@@ -68,7 +68,7 @@ export const ContinuityDashboard: React.FC = () => {
         <div className="col-span-12 lg:col-span-3">
           <div className="panel p-4 space-y-4">
             <div className="flex items-center gap-3 mb-4">
-              <div className="size-10 rounded-full bg-violet-500/20 border border-violet-500/40 flex items-center justify-center">
+              <div className="size-10 rounded-full bg-primary/20 border border-primary/40 flex items-center justify-center">
                 <span className="text-lg">🧠</span>
               </div>
               <div>
@@ -109,7 +109,7 @@ export const ContinuityDashboard: React.FC = () => {
               <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                 <span className="text-[10px] text-muted-foreground font-semibold">CLASSIFICAÇÃO:</span>
                 <span
-                  className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${state.lastAnalysis?.score?.classification === "EXCELLENT" ? "bg-green-500/20 text-green-400" : state.lastAnalysis?.score?.classification === "GOOD" ? "bg-emerald-500/20 text-emerald-400" : state.lastAnalysis?.score?.classification === "FAIR" ? "bg-yellow-500/20 text-yellow-400" : "bg-red-500/20 text-red-400"}`}
+                  className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${state.lastAnalysis?.score?.classification === "EXCELLENT" ? "bg-success/20 text-success" : state.lastAnalysis?.score?.classification === "GOOD" ? "bg-success/20 text-success" : state.lastAnalysis?.score?.classification === "FAIR" ? "bg-warning/20 text-warning" : "bg-danger/20 text-danger"}`}
                 >
                   {state.lastAnalysis?.score?.classification?.toUpperCase() || "AGUARDANDO"}
                 </span>
@@ -172,7 +172,7 @@ export const ContinuityDashboard: React.FC = () => {
               <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                 <span className="text-[10px] text-muted-foreground font-semibold">CLASSIFICAÇÃO:</span>
                 <span
-                  className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${state.lastAnalysis?.score?.classification === "EXCELLENT" ? "bg-green-500/20 text-green-400" : state.lastAnalysis?.score?.classification === "GOOD" ? "bg-emerald-500/20 text-emerald-400" : state.lastAnalysis?.score?.classification === "FAIR" ? "bg-yellow-500/20 text-yellow-400" : "bg-red-500/20 text-red-400"}`}
+                  className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${state.lastAnalysis?.score?.classification === "EXCELLENT" ? "bg-success/20 text-success" : state.lastAnalysis?.score?.classification === "GOOD" ? "bg-success/20 text-success" : state.lastAnalysis?.score?.classification === "FAIR" ? "bg-warning/20 text-warning" : "bg-danger/20 text-danger"}`}
                 >
                   {state.lastAnalysis?.score?.classification?.toUpperCase() || "AGUARDANDO"}
                 </span>
@@ -277,35 +277,35 @@ export const ContinuityDashboard: React.FC = () => {
               <div className="space-y-3">
                 <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                   <span className="text-[10px] text-muted-foreground font-semibold">Stop Loss:</span>
-                  <span className="text-xs font-mono font-bold text-red-400">
+                  <span className="text-xs font-mono font-bold text-danger">
                     {state.config.stopLoss?.toFixed(2) || "0.00"}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                   <span className="text-[10px] text-muted-foreground font-semibold">Target Profit:</span>
-                  <span className="text-xs font-mono font-bold text-green-400">
+                  <span className="text-xs font-mono font-bold text-success">
                     {state.config.targetProfit?.toFixed(2) || "0.00"}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                   <span className="text-[10px] text-muted-foreground font-semibold">Max Level:</span>
-                  <span className="text-xs font-mono font-bold text-blue-400">
+                  <span className="text-xs font-mono font-bold text-info">
                     {state.config.maxLevel || "15"}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                   <span className="text-[10px] text-muted-foreground font-semibold">Payout:</span>
-                  <span className="text-xs font-mono font-bold text-yellow-400">
+                  <span className="text-xs font-mono font-bold text-warning">
                     {(state.config.payout * 100).toFixed(1)}%
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                   <span className="text-[10px] text-muted-foreground font-semibold">Initial Stake:</span>
-                  <span className="text-xs font-mono font-bold text-purple-400">
+                  <span className="text-xs font-mono font-bold text-primary">
                     R$ {state.config.initialStake?.toFixed(2) || "0.00"}
                   </span>
                 </div>
@@ -313,7 +313,7 @@ export const ContinuityDashboard: React.FC = () => {
                 <div className="flex items-center justify-between p-3 rounded bg-muted/10 border border-border">
                   <span className="text-[10px] text-muted-foreground font-semibold">Account Type:</span>
                   <span
-                    className={`text-xs font-mono font-bold ${state.config.accountType === "demo" ? "text-orange-400" : "text-green-400"}`}
+                    className={`text-xs font-mono font-bold ${state.config.accountType === "demo" ? "text-warning" : "text-success"}`}
                   >
                     {state.config.accountType?.toUpperCase()}
                   </span>

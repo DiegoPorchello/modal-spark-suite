@@ -19,6 +19,7 @@ import type {
   ScoreFilterDisplay,
   ScoreBand,
   ScanLogEntry,
+  BufferAssetEntry,
 } from "./AnalystTypes";
 import type { DecisionContext as DecisionContextType } from "../flow-continuity/types/decision-context.types";
 import type { OperationContext as OperationContextType } from "../flow-continuity/types/operation-context.types";
@@ -27,6 +28,7 @@ import type { PerformanceContext as PerformanceContextType } from "../performanc
 import type { AdvisorContext as AdvisorContextType } from "../advisor/types/advisor-context.types";
 import { resolveAnalystMessage } from "./AnalystEvents";
 import { DEFAULT_DIAGNOSTIC } from "./AnalystTypes";
+import { getBestEntryPerAsset } from "../../ranking";
 
 let _idCounter = 0;
 function nextId(): string {
@@ -86,6 +88,8 @@ export interface AnalystStore {
   updateStats: (partial: Partial<AnalystStats>) => void;
   setLastExplanation: (text: string) => void;
   updateMarket: (partial: Partial<MarketInfo>) => void;
+  bufferAssets: Record<string, BufferAssetEntry>;
+  setBufferAssets: (updater: Record<string, BufferAssetEntry> | ((prev: Record<string, BufferAssetEntry>) => Record<string, BufferAssetEntry>)) => void;
   updateCandleReading: (partial: Partial<CandleReading>) => void;
   addDiaryEntry: (text: string, icon: string, level?: AnalystMessageLevel) => void;
   clearDiary: () => void;
@@ -117,6 +121,13 @@ const DEFAULT_MARKET: MarketInfo = {
   strength: 0,
   score: 0,
   confidence: 0,
+  direction: null,
+  analysisPhase: "idle",
+  engineStatus: "idle",
+  scanProgress: 0,
+  catalogProgress: null,
+  profile: "AUTO",
+  bufferVisual: null,
 };
 
 const DEFAULT_CANDLE: CandleReading = {
@@ -145,6 +156,7 @@ export function useAnalystStore(): AnalystStore {
   const [stats, setStats] = useState<AnalystStats>(DEFAULT_STATS);
   const [lastExplanation, setLastExplanationState] = useState("");
   const [market, setMarket] = useState<MarketInfo>(DEFAULT_MARKET);
+  const [bufferAssets, setBufferAssetsState] = useState<Record<string, BufferAssetEntry>>({});
   const [candleReading, setCandleReading] = useState<CandleReading>(DEFAULT_CANDLE);
   const [diary, setDiary] = useState<DiaryEntry[]>([]);
   const [diagnostic, setDiagnostic] = useState<DiagnosticState>(DEFAULT_DIAGNOSTIC);
@@ -227,7 +239,7 @@ export function useAnalystStore(): AnalystStore {
   }, []);
 
   const setScanLog = useCallback((entries: ScanLogEntry[]) => {
-    setScanLogState([...entries]);
+    setScanLogState(Array.from(getBestEntryPerAsset(entries).values()));
   }, []);
 
   const setDecisionContext = useCallback((ctx: DecisionContextType) => {
@@ -269,6 +281,14 @@ export function useAnalystStore(): AnalystStore {
 
   const updateMarket = useCallback((partial: Partial<MarketInfo>) => {
     setMarket((prev) => ({ ...prev, ...partial }));
+  }, []);
+
+  const setBufferAssets = useCallback((updater: Record<string, BufferAssetEntry> | ((prev: Record<string, BufferAssetEntry>) => Record<string, BufferAssetEntry>)) => {
+    if (typeof updater === "function") {
+      setBufferAssetsState(updater);
+    } else {
+      setBufferAssetsState(updater);
+    }
   }, []);
 
   const updateCandleReading = useCallback((partial: Partial<CandleReading>) => {
@@ -393,6 +413,8 @@ export function useAnalystStore(): AnalystStore {
       updateStats,
       setLastExplanation,
       updateMarket,
+      bufferAssets,
+      setBufferAssets,
       updateCandleReading,
       addDiaryEntry,
       clearDiary,
@@ -413,6 +435,8 @@ export function useAnalystStore(): AnalystStore {
       stats,
       lastExplanation,
       market,
+      bufferAssets,
+      setBufferAssets,
       candleReading,
       diary,
       diagnostic,

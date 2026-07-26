@@ -188,6 +188,17 @@ export const ANALYST_EVENT_MAP: Record<AnalystEventType, AnalystEventDef> = {
     },
     icon: "📊",
   },
+  "score.updated": {
+    level: "info",
+    mode: "compact",
+    text: (m) => {
+      const score = Number(m?.score || 0);
+      const direction = String(m?.direction || "NEUTRO");
+      const asset = String(m?.asset || "?");
+      return `Score ${asset}: ${score} (${direction})`;
+    },
+    icon: "📈",
+  },
   "trade.call": {
     level: "success",
     mode: "compact",
@@ -512,11 +523,95 @@ export const ANALYST_EVENT_MAP: Record<AnalystEventType, AnalystEventDef> = {
     },
     icon: "🧠",
   },
+  "market.profile.changed": {
+    level: "info",
+    mode: "explanatory",
+    text: (m) => {
+      const mode = String(m?.mode ?? "AUTO");
+      const market = String(m?.detectedMarket ?? "?");
+      const core = String(m?.activeProfile ?? "?");
+      const conf = Number(m?.confidence ?? 0);
+      return `Market: ${mode} → ${market} (${core}) — ${conf}% confiança`;
+    },
+    icon: "🌍",
+  },
   "system.info": {
     level: "info",
     mode: "developer",
     text: (m) => String(m?.message || "Informação do sistema."),
     icon: "ℹ️",
+  },
+  "strategy.state.changed": {
+    level: "info",
+    mode: "compact",
+    text: (m) => {
+      const name = String(m?.strategyName ?? "Strategy");
+      const from = String(m?.from ?? "?");
+      const to = String(m?.to ?? "?");
+      const reason = m?.reason ? ` (${String(m.reason)})` : "";
+      return `${name}: ${from} → ${to}${reason}`;
+    },
+    icon: "🔄",
+  },
+  "strategy.timeline.updated": {
+    level: "info",
+    mode: "developer",
+    text: (m) => {
+      const name = String(m?.strategyId ?? "?");
+      const state = String(m?.currentState ?? "?");
+      const count = Number(m?.entryCount ?? 0);
+      return `${name} — Estado: ${state} (timeline: ${count} etapas)`;
+    },
+    icon: "📊",
+  },
+  "memory.record.created": {
+    level: "success",
+    mode: "compact",
+    text: (m) => {
+      const asset = String(m?.asset ?? "?");
+      const strategy = String(m?.strategy ?? "?");
+      const result = String(m?.result ?? "PENDING");
+      return `Operação registrada: ${asset} (${strategy}) — ${result}`;
+    },
+    icon: "💾",
+  },
+  "memory.record.updated": {
+    level: "info",
+    mode: "developer",
+    text: (m) => {
+      const id = String(m?.recordId ?? "?");
+      const result = String(m?.result ?? "?");
+      return `Registro ${id} atualizado — ${result}`;
+    },
+    icon: "📝",
+  },
+  "learning.analysis.completed": {
+    level: "success",
+    mode: "compact",
+    text: (m) => {
+      const total = Number(m?.totalOperations ?? 0);
+      const winRate = Number(m?.winRate ?? 0);
+      return `Análise concluída: ${total} operações — Win Rate: ${winRate.toFixed(1)}%`;
+    },
+    icon: "🧠",
+  },
+  "learning.insight.created": {
+    level: "info",
+    mode: "compact",
+    text: (m) => {
+      const title = String(m?.title ?? "Novo insight");
+      return `Insight: ${title}`;
+    },
+    icon: "💡",
+  },
+  "optimizer.recommendation.created": {
+    level: "info",
+    mode: "compact",
+    text: (m) => {
+      const title = String(m?.title ?? "Nova recomendação");
+      return `Recomendação: ${title}`;
+    },
+    icon: "🎯",
   },
 };
 

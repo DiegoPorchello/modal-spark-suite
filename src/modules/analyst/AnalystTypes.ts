@@ -16,6 +16,7 @@ export type AnalystEventType =
   | "catalog.search"
   | "catalog.result"
   | "score.calculated"
+  | "score.updated"
   | "score.breakdown"
   | "trade.call"
   | "trade.put"
@@ -56,6 +57,7 @@ export type AnalystEventType =
   | "robot.error"
   | "diary.entry"
   | "market.update"
+  | "buffer.asset.update"
   | "scanLog.update"
   | "ai.decision"
   | "ai.blocked-entry"
@@ -64,6 +66,14 @@ export type AnalystEventType =
   | "replay.context"
   | "performance.context"
   | "advisor.context"
+  | "market.profile.changed"
+  | "strategy.state.changed"
+  | "strategy.timeline.updated"
+  | "memory.record.created"
+  | "memory.record.updated"
+  | "learning.analysis.completed"
+  | "learning.insight.created"
+  | "optimizer.recommendation.created"
   | "system.info";
 
 export type AnalystMessageLevel = "success" | "info" | "warning" | "error";
@@ -84,6 +94,20 @@ export type AnalystAIState =
   | "loss"
   | "recovery"
   | "recovery-finished";
+
+// ══════════════════════════════════════════════════════════════
+// STANDARDIZED EVENT CONTRACT
+// Every event emitted by the engine MUST include these fields.
+// The UI never has to guess missing data.
+// ══════════════════════════════════════════════════════════════
+export interface AnalystEvent {
+  type: AnalystEventType;
+  asset: string;
+  timeframe: string;
+  traceId: string;
+  timestamp: number;
+  payload: Record<string, unknown>;
+}
 
 export type CandleDominance = "compradora" | "vendedora" | "neutra";
 export type CandlePressure = "alta" | "media" | "baixa";
@@ -130,6 +154,34 @@ export interface MarketInfo {
   strength: number;
   score: number;
   confidence: number;
+  // ── Single source of truth for live display ──
+  direction: "call" | "put" | null;
+  analysisPhase: "idle" | "scoring" | "trending" | "structure" | "momentum" | "done";
+  engineStatus: "idle" | "analyzing" | "waiting" | "operating" | "error";
+  scanProgress: number;
+  catalogProgress: { scanned: number; total: number } | null;
+  profile: string;
+  // ── Buffer visual progress (real-time, independent of operational logic) ──
+  bufferVisual: {
+    current: number;
+    capacity: number;
+    minimum: number;
+    percent: number;
+  } | null;
+}
+
+/** Per-asset buffer health — emitted on every candle arrival */
+export interface BufferAssetEntry {
+  asset: string;
+  current: number;
+  capacity: number;
+  minimum: number;
+  percent: number;
+  lastCandleTime: number;
+  secondsWithoutCandles: number;
+  isReceiving: boolean;
+  bufferHealth: "live" | "waiting" | "stale";
+  bufferStatus: string;
 }
 
 export interface CandleReading {
@@ -207,6 +259,7 @@ export interface ScoreEvolutionEntry {
 }
 
 export interface ScanLogEntry {
+  traceId: string;
   asset: string;
   score: number;
   blocked: boolean;
@@ -216,6 +269,15 @@ export interface ScanLogEntry {
   pattern?: string;
   direction?: string;
   timeframe?: string;
+  stageTimings?: {
+    trend: number;
+    structure: number;
+    priceAction: number;
+    smartMoney: number;
+    momentum: number;
+    score: number;
+    total: number;
+  };
 }
 
 export const SCORE_BAND_CONFIG: Record<
@@ -230,9 +292,9 @@ export const SCORE_BAND_CONFIG: Record<
   },
   FRACO: {
     label: "Mercado Fraco",
-    color: "text-orange-500",
-    bgColor: "bg-orange-500/10",
-    borderColor: "border-orange-500/20",
+    color: "text-warning",
+    bgColor: "bg-warning/10",
+    borderColor: "border-warning/20",
   },
   OBSERVACAO: {
     label: "Mercado Observação",
@@ -296,9 +358,9 @@ export const ANALYST_AI_STATE_CONFIG: Record<
   "confirming-entry": {
     label: "Confirmando entrada",
     avatar: "🟠",
-    color: "text-orange-500",
-    bgColor: "bg-orange-500/10",
-    borderColor: "border-orange-500/20",
+    color: "text-warning",
+    bgColor: "bg-warning/10",
+    borderColor: "border-warning/20",
   },
   waiting: {
     label: "Aguardando",
@@ -317,9 +379,9 @@ export const ANALYST_AI_STATE_CONFIG: Record<
   preparing: {
     label: "Entrada preparada",
     avatar: "🔵",
-    color: "text-blue-500",
-    bgColor: "bg-blue-500/10",
-    borderColor: "border-blue-500/20",
+    color: "text-info",
+    bgColor: "bg-info/10",
+    borderColor: "border-info/20",
   },
   operating: {
     label: "Operando",
@@ -345,9 +407,9 @@ export const ANALYST_AI_STATE_CONFIG: Record<
   recovery: {
     label: "Recovery iniciado",
     avatar: "🟣",
-    color: "text-purple-500",
-    bgColor: "bg-purple-500/10",
-    borderColor: "border-purple-500/20",
+    color: "text-primary",
+    bgColor: "bg-primary/10",
+    borderColor: "border-primary/20",
   },
   "recovery-finished": {
     label: "Recovery finalizado",

@@ -46,6 +46,7 @@ export class ExecutionEngine {
   private _records: EntryRecord[] = [];
   private _maxRecords = 200;
   private _statsLogCounter = 0;
+  private _pendingOrderCount = 0;
 
   constructor(broker: PumaBrokerAdapter) {
     this._broker = broker;
@@ -99,13 +100,18 @@ export class ExecutionEngine {
     this._nextTrade = trade;
     engineLogger.info(
       "ExecutionEngine",
-      `NextTrade definido: ${trade.symbol} ${trade.direction} score=${trade.score}`,
+      `NextTrade definido: ${trade.symbol} ${trade.direction} score=${trade.score} traceId=${trade.traceId}`,
       {
+        traceId: trade.traceId,
         symbol: trade.symbol,
         direction: trade.direction,
         score: trade.score,
         decidedAt: new Date(trade.decidedAt).toISOString(),
+        signalCandleTime: new Date(trade.signalCandleTime).toISOString(),
       },
+    );
+    console.log(
+      `[TIMING] SET_NEXT_TRADE traceId=${trade.traceId} asset=${trade.symbol} dir=${trade.direction} signalCandle=${trade.signalCandleTime} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`,
     );
   }
 
@@ -147,16 +153,53 @@ export class ExecutionEngine {
     const now = this.clock.now;
     const currentCandle = Math.floor(now / 60000) * 60000;
     const msToNext = Math.max(0, currentCandle + 60000 - now);
+    const tsDate = Date.now();
+    const tsPerf = performance.now();
+
+    // ── LOGGING COMPLETO ──
+    console.log(
+      `[TICK]now=${now} nextDecision=${this._nextTrade?.decidedAt ?? "null"} msToNext=${msToNext} status=${this._phase} decisionTriggered=${this._decisionTriggered} nextTrade=${!!this._nextTrade} activeOperation=${!!this._nextTrade?.valid} traceId=${this._nextTrade?.traceId ?? "none"} tsDate=${tsDate} tsPerf=${tsPerf.toFixed(2)}`,
+    );
 
     // ── DETECÇÃO DE ABERTURA DE CANDLE ──
     if (currentCandle > this._lastCandleTime) {
       this._lastCandleTime = currentCandle;
       this._decisionTriggered = false;
+      console.log(
+        `[TIMING] CANDLE_OPEN_DETECTED candleTime=${currentCandle} msToNext=${msToNext} traceId=${this._nextTrade?.traceId ?? "none"} pendingOrders=${this._pendingOrderCount} tsDate=${tsDate} tsPerf=${tsPerf.toFixed(2)}`,
+      );
       this._onCandleOpen(currentCandle);
+      console.log(`[TICK RESULT]motivo=CALL_ON_DECISION`);
       return;
     }
 
     // ── JANELA DE DECISÃO (200ms antes do fechamento) ──
+    const msToNextTooHigh = msToNext > DECISION_ADVANCE_MS;
+    const msToNextNegative = msToNext <= 0;
+    const decisionAlreadyTriggered = this._decisionTriggered;
+    const nextTradeExists = !!this._nextTrade;
+    const activeOperation = !!this._nextTrade?.valid;
+
+    // Determina o motivo da saída
+    let reason = "";
+    if (msToNextTooHigh) {
+      reason = "MS_TO_NEXT_TOO_HIGH";
+    } else if (msToNextNegative) {
+      reason = "MS_TO_NEXT_NEGATIVE";
+    } else if (decisionAlreadyTriggered) {
+      reason = "DECISION_ALREADY_TRIGGERED";
+    } else if (nextTradeExists) {
+      reason = "NEXT_TRADE_EXISTS";
+    } else if (activeOperation) {
+      reason = "ACTIVE_OPERATION";
+    }
+
+    if (reason) {
+      console.log(`[TICK RESULT]motivo=${reason}`);
+      return;
+    }
+
+    // Checagem explícita da condição
     if (
       msToNext <= DECISION_ADVANCE_MS &&
       msToNext > 0 &&
@@ -180,6 +223,9 @@ export class ExecutionEngine {
           error: String(err),
         });
       }
+      console.log(`[TICK RESULT]motivo=CALL_ON_DECISION`);
+    } else {
+      console.log(`[TICK RESULT]motivo=CONDITION_NOT_MET`);
     }
   }
 
@@ -201,6 +247,18 @@ export class ExecutionEngine {
       return;
     }
 
+    this._pendingOrderCount++;
+    const t0 = performance.now();
+    const tsDateNow = Date.now();
+    const tsClockNow = this.clock.now;
+    const tsPerfNow = t0;
+
+    console.log(`[AUDIT] [CANDLE_OPEN] symbol=${trade.symbol} candleTime=${new Date(candleTime).toISOString()} local=${new Date().toISOString()} perf=${t0}`);
+    console.log(`[AUDIT] [EXECUTION_START] symbol=${trade.symbol} perf=${t0}`);
+    console.log(
+      `[TIMING] EXECUTION_START traceId=${trade.traceId} asset=${trade.symbol} candleTime=${candleTime} signalCandleTime=${trade.signalCandleTime} tsDate=${tsDateNow} tsClock=${tsClockNow} tsPerf=${tsPerfNow.toFixed(2)} queueLen=${this._pendingOrderCount}`
+    );
+
     const decisionTime = trade.decidedAt;
     const sendTime = Date.now();
     latencyTracker.mark("candle_open", "Candle Open", {
@@ -208,6 +266,7 @@ export class ExecutionEngine {
     });
 
     engineLogger.info("ExecutionEngine", `═══ EXECUTANDO ORDEM NA ABERTURA ═══`, {
+      traceId: trade.traceId,
       symbol: trade.symbol,
       direction: trade.direction,
       candleOpen: new Date(candleTime).toISOString(),
@@ -227,10 +286,16 @@ export class ExecutionEngine {
         entryPrice: trade.entryPrice,
         timeframe: trade.timeframe,
         decidedAt: trade.decidedAt,
+        traceId: trade.traceId,
+        signalCandleTime: trade.signalCandleTime,
+        signalCandleOpen: trade.signalCandleOpen,
+        signalCandleClose: trade.signalCandleClose,
+        candleId: trade.candleId,
+        durationReceived: trade.expiration,
       };
 
       console.log("[EXECUTION]", {
-        traceId: trade.decidedAt,
+        traceId: trade.traceId,
         asset: trade.symbol,
         direction: trade.direction,
         amount: trade.amount,
@@ -239,14 +304,19 @@ export class ExecutionEngine {
         timeframe: trade.timeframe,
         candleOpen: new Date(candleTime).toISOString(),
         decisionDelay,
+        signalCandleTime: trade.signalCandleTime,
+        candleId: trade.candleId,
       });
       engineLogger.info("ExecutionEngine", "[AMOUNT TRACE] nextTrade → orderParams", {
-        traceId: trade.decidedAt,
+        traceId: trade.traceId,
         amount: trade.amount,
         direction: trade.direction,
         symbol: trade.symbol,
       });
 
+      console.log(
+        `[TIMING] BEFORE_BROKER traceId=${trade.traceId} asset=${trade.symbol} dir=${trade.direction} duration=${trade.expiration} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+      );
       latencyTracker.mark("order_sent_proxy", "Order Sent to Proxy", {
         symbol: trade.symbol,
         direction: trade.direction,
@@ -258,11 +328,17 @@ export class ExecutionEngine {
       latencyTracker.mark("proxy_responded", "Proxy Responded", { orderId: orderResult.orderId });
 
       const confirmationTime = Date.now();
+      this._pendingOrderCount = Math.max(0, this._pendingOrderCount - 1);
       latencyTracker.mark("trade_opened", "Trade Opened", { orderId: orderResult.orderId });
       const executionDelay = confirmationTime - sendTime;
       const totalLatency = confirmationTime - candleTime;
 
+      console.log(
+        `[TIMING] AFTER_BROKER traceId=${trade.traceId} orderId=${orderResult.orderId} executionMs=${executionDelay} totalMs=${totalLatency} pendingOrders=${this._pendingOrderCount} tsDate=${confirmationTime} tsPerf=${performance.now().toFixed(2)}`
+      );
+
       const record: EntryRecord = {
+        traceId: trade.traceId,
         tradeId: orderResult.orderId,
         decisionId: trade.decisionId,
         symbol: trade.symbol,
@@ -276,6 +352,20 @@ export class ExecutionEngine {
         brokerDelay: executionDelay,
         totalLatency,
         result: "DRAW",
+        signalCandleTime: trade.signalCandleTime,
+        signalCandleOpen: trade.signalCandleOpen,
+        signalCandleClose: trade.signalCandleClose,
+        expectedEntryCandle: trade.signalCandleTime + 60000,
+        actualEntryTime: sendTime,
+        expectedExpiration: trade.signalCandleTime + 60000 + trade.expiration * 1000,
+        actualExpiration: "",
+        candleId: trade.candleId,
+        durationReceived: trade.expiration,
+        durationPropagated: trade.expiration,
+        durationEffective: trade.expiration,
+        tsDateNow,
+        tsClockNow,
+        tsPerfNow,
       };
 
       this._records.push(record);
@@ -292,6 +382,7 @@ export class ExecutionEngine {
       const sendTimeStr = new Date(sendTime).toISOString();
 
       console.log("[ORDER CREATED]", {
+        traceId: trade.traceId,
         decisionId: trade.decisionId,
         tradeId: record.tradeId,
         decidedAt: trade.decidedAt,
@@ -303,6 +394,7 @@ export class ExecutionEngine {
         totalLatency: `${totalLatency}ms`,
       });
       console.log("[DECISION EXECUTED]", {
+        traceId: trade.traceId,
         decisionId: trade.decisionId,
         tradeId: record.tradeId,
         direction: trade.direction,
@@ -318,7 +410,12 @@ export class ExecutionEngine {
         brokerLatency: `${executionDelay}ms`,
         totalLatency: `${totalLatency}ms`,
       });
+
+      console.log(
+        `[TIMING] ENTRY_RECORD traceId=${trade.traceId} tradeId=${record.tradeId} signalCandle=${trade.signalCandleTime} expectedEntry=${record.expectedEntryCandle} actualEntry=${record.actualEntryTime} expectedExp=${record.expectedExpiration} durationReceived=${trade.expiration} durationPropagated=${trade.expiration} durationEffective=${trade.expiration} sameCandle=${sameCandle} totalMs=${totalLatency}`
+      );
       engineLogger.info("ExecutionEngine", `═══ ORDEM EXECUTADA ═══`, {
+        traceId: trade.traceId,
         decisionId: trade.decisionId,
         tradeId: record.tradeId,
         totalLatency: `${totalLatency}ms`,
@@ -337,6 +434,7 @@ export class ExecutionEngine {
       this._callbacks?.onEntry?.(record);
       this._nextTrade = null;
     } catch (err) {
+      this._pendingOrderCount = Math.max(0, this._pendingOrderCount - 1);
       engineLogger.error("ExecutionEngine", "Falha ao executar ordem na abertura", {
         error: String(err),
         symbol: trade.symbol,

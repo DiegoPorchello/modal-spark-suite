@@ -4,6 +4,11 @@ import type { PumaBrokerAdapter } from "../broker/puma-broker-adapter";
 import type { Candle } from "../market/types";
 import { DecisionEngine, type DecisionResult } from "./decision/DecisionEngine";
 import type { BlockedRule } from "./decision/DecisionEngine";
+import {
+  DEFAULT_HYBRID_PROBABILITY_CONFIG,
+  type HybridProbabilityConfig,
+} from "./decision/HybridProbabilityEngine";
+import { DecisionTimeline } from "./decision-timeline";
 import { ScoreEngine } from "./decision/ScoreEngine";
 import { analystBus } from "../modules/analyst/EventBus";
 import type { AnalystEventType, ScanLogEntry } from "../modules/analyst/AnalystTypes";
@@ -20,15 +25,21 @@ import { buildOperationContext } from "../modules/flow-continuity/services/opera
 import type { OperationContext } from "../modules/flow-continuity/types/operation-context.types";
 import { buildReplayContext } from "../modules/flow-continuity/services/replay-engine";
 import type { ReplayContext } from "../modules/flow-continuity/types/replay-context.types";
-import { buildPerformanceContext, buildSnapshot } from "../modules/performance/services/performance-engine";
+import {
+  buildPerformanceContext,
+  buildSnapshot,
+} from "../modules/performance/services/performance-engine";
 import type { PerformanceContext } from "../modules/performance/types/performance-context.types";
 import { performanceHistory } from "../modules/performance/services/performance-history";
 import { StrategyManager } from "../services/strategy-manager";
 
+import { getProfileCandleConfig } from "../types/operational-profile-config";
+import { signalLogger } from "./statistics/signal-log";
+import { ENGINE_VERSION, DATABASE_VERSION, PATTERN_CATALOG_VERSION } from "./statistics/signal-log";
+
 /**
  * Ativos sintéticos Puma — não existem na Binance.
- * Recebem candles via REST /history (200 candles) + WS2 tempo real.
- * Threshold mínimo = 70 candles (igual forex).
+ * Recebem candles via REST /history + WS2 tempo real.
  */
 const HYBRID_PUMA_ASSETS = new Set([
   "BETHUSDT",
@@ -39,9 +50,117 @@ const HYBRID_PUMA_ASSETS = new Set([
 ]);
 
 /** Retorna o mínimo de candles necessários para operar com um ativo. */
-function getMinCandles(asset: string): number {
-  return 70;
+function getMinCandles(profile: string): number {
+  const config = getProfileCandleConfig(profile as any);
+  return config.minCandles;
 }
+
+/** Retorna a quantidade de candles a buscar do broker. */
+function getFetchSize(profile: string): number {
+  const config = getProfileCandleConfig(profile as any);
+  return config.fetchSize;
+}
+
+let _traceCounter = 0;
+const makeTraceId = () => `scan-${Date.now()}-${++_traceCounter}`;
+
+// ══════════════════════════════════════════════════════════════
+// SCHEDULER METRICS — observabilidade sem alterar lógica
+// ══════════════════════════════════════════════════════════════
+export type ScheduleReason =
+  | "STARTUP"
+  | "NO_SIGNAL"
+  | "COOLDOWN_ACTIVE"
+  | "INVALID_ENTRY"
+  | "OPERATION_FINISHED"
+  | "SESSION_CHANGED"
+  | "ERROR_RETRY"
+  | "INSUFFICIENT_DATA"
+  | "OUTSIDE_SESSION"
+  | "POST_TRADE"
+  | "RISK_STOP"
+  | "VARIABLE_DELAY";
+
+export type DecisionExitStatus =
+  | "APPROVED"
+  | "BLOCKED_NO_SIGNAL"
+  | "BLOCKED_COOLDOWN"
+  | "BLOCKED_INVALID_ENTRY"
+  | "BLOCKED_STATUS"
+  | "BLOCKED_PROCESSING"
+  | "BLOCKED_ACTIVE_OP"
+  | "BLOCKED_RISK"
+  | "BLOCKED_DUPLICATE"
+  | "BLOCKED_RACE_CONDITION"
+  | "ERROR";
+
+class SchedulerMetrics {
+  decisionCount = 0;
+  rescheduleCount = 0;
+  approvedCount = 0;
+  blockedCount = 0;
+  cooldownCount = 0;
+  errorCount = 0;
+  noSignalCount = 0;
+  blockedReasons: Record<string, number> = {};
+  private _lastSummaryAt = 0;
+
+  recordDecision(): void {
+    this.decisionCount++;
+    if (this.decisionCount % 100 === 0 && this.decisionCount !== this._lastSummaryAt) {
+      this._lastSummaryAt = this.decisionCount;
+      this._logSummary();
+    }
+  }
+
+  recordReschedule(): void { this.rescheduleCount++; }
+  recordApproved(): void { this.approvedCount++; }
+  recordBlocked(): void { this.blockedCount++; }
+  recordCooldown(): void { this.cooldownCount++; }
+  recordError(): void { this.errorCount++; }
+  recordNoSignal(): void { this.noSignalCount++; }
+
+  recordBlockedReason(reason: string): void {
+    this.blockedCount++;
+    this.blockedReasons[reason] = (this.blockedReasons[reason] ?? 0) + 1;
+  }
+
+  private _logSummary(): void {
+    const topReasons = Object.entries(this.blockedReasons)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 8)
+      .map(([r, c]) => `  ${r.padEnd(20)} ${c}`)
+      .join("\n");
+
+    engineLogger.info("SchedulerMetrics", `═══ SCHEDULER REPORT (últimas 100 decisões) ═══`, {
+      totalDecisions: this.decisionCount,
+      approved: this.approvedCount,
+      blocked: this.blockedCount,
+      noSignal: this.noSignalCount,
+      cooldown: this.cooldownCount,
+      errors: this.errorCount,
+      reschedules: this.rescheduleCount,
+      approvalRate: this.decisionCount > 0
+        ? `${((this.approvedCount / this.decisionCount) * 100).toFixed(1)}%`
+        : "N/A",
+      blockedReasons: topReasons || "none",
+    });
+  }
+
+  getSnapshot(): Record<string, number> {
+    return {
+      decisions: this.decisionCount,
+      approved: this.approvedCount,
+      blocked: this.blockedCount,
+      noSignal: this.noSignalCount,
+      cooldown: this.cooldownCount,
+      errors: this.errorCount,
+      reschedules: this.rescheduleCount,
+    };
+  }
+}
+
+const schedulerMetrics = new SchedulerMetrics();
 
 const DEMO_DAILY_LIMIT = 50;
 
@@ -88,6 +207,12 @@ export interface RobotConfig {
   payout: number;
   maxLevel: number;
   customLevels: number[];
+  /** Market mode: AUTO (detect), FOREX, or HYBRID */
+  marketMode: "AUTO" | "FOREX" | "HYBRID";
+  /** Operational profile selected by the user (independent of marketMode detection). */
+  operationProfile?: "AUTO" | "FOREX" | "HYBRID_FLOW" | "HYBRID_PROBABILITY";
+  /** Per-profile configuration for HYBRID_PROBABILITY decision motor. */
+  hybridProbabilityConfig?: HybridProbabilityConfig;
   // Callback opcional para sobrescrever resultado do broker (WIN/LOSS/DRAW)
   // Recebe: tradeId, asset, direction, amount, brokerResult, entryPrice
   // Retorna: "WIN" | "LOSS" | "DRAW" | null (null = usa resultado do broker)
@@ -209,6 +334,9 @@ export const DEFAULT_ROBOT_CONFIG: RobotConfig = {
     "XRPSOLUSDT",
     "XAUUSD",
   ],
+  marketMode: "AUTO",
+  operationProfile: "AUTO",
+  hybridProbabilityConfig: { ...DEFAULT_HYBRID_PROBABILITY_CONFIG },
 };
 
 const CONFIG_STORAGE_KEY = "nexor_config";
@@ -287,6 +415,18 @@ export class FlowRobotEngine {
   private _replayHistory: ReplayContext[] = [];
   private static readonly MAX_REPLAY_HISTORY = 100;
   private _lastPerformanceContext: PerformanceContext | null = null;
+  private _lastSignalLogId: string | null = null;
+
+  private _logState(event: string, detail?: Record<string, unknown>): void {
+    engineLogger.info("FlowRobot", `[STATE] ${event}`, {
+      status: this._state.status,
+      isProcessing: FlowRobotEngine._isProcessing,
+      hasNextTrade: !!this._state.nextTrade,
+      hasActiveOp: !!this._state.activeOperation,
+      asset: this._state.config.asset,
+      ...detail,
+    });
+  }
 
   constructor(broker: PumaBrokerAdapter) {
     this.instanceId = FlowRobotEngine._nextId++;
@@ -298,6 +438,19 @@ export class FlowRobotEngine {
     const initialConfig = savedConfig
       ? { ...DEFAULT_ROBOT_CONFIG, ...savedConfig }
       : DEFAULT_ROBOT_CONFIG;
+    const ts = new Date().toLocaleTimeString("pt-BR");
+    console.log(
+      `[FlowRobotEngine] ${ts} 🔧 Constructor — savedConfig from localStorage:`,
+      savedConfig
+        ? {
+            asset: savedConfig.asset,
+            marketMode: savedConfig.marketMode,
+          }
+        : "null",
+    );
+    console.log(
+      `[FlowRobotEngine] ${ts} 🔧 Constructor — initialConfig.asset: ${initialConfig.asset}, marketMode: ${initialConfig.marketMode}`,
+    );
     const sessionInfo = this.broker.getSessionInfo();
     const currentSession = sessionInfo?.currentSession;
 
@@ -340,6 +493,14 @@ export class FlowRobotEngine {
     // Debug: expõe engine no console do navegador
     (window as any).__robotEngine = this;
     (window as any).__smartRecovery = this.smartRecovery;
+  }
+
+  getAuditReport() {
+    return this.decisionEngine.getAuditReport();
+  }
+
+  clearAudit() {
+    this.decisionEngine.clearAudit();
   }
 
   loadPersistedOps(): void {
@@ -415,7 +576,7 @@ export class FlowRobotEngine {
     // Respeita a seleção do usuário, filtrando apenas pelos disponíveis na sessão
     const sessionInfo = this.broker.getSessionInfo();
     const userAssets = mergedConfig.assets?.length ? mergedConfig.assets : sessionInfo.activeAssets;
-    mergedConfig.assets = userAssets.filter(a => sessionInfo.activeAssets.includes(a));
+    mergedConfig.assets = userAssets.filter((a) => sessionInfo.activeAssets.includes(a));
     if (mergedConfig.assets.length === 0) {
       mergedConfig.assets = sessionInfo.activeAssets;
     }
@@ -533,20 +694,32 @@ export class FlowRobotEngine {
     this._refreshBalance()
       .then(() => {
         this._startBalanceRefresh(30000);
-        engineLogger.info("FlowRobot", "Saldo real carregado — ROBOT READY. Iniciando ciclo de operações.", {});
-        this._scheduleNextOperation(10);
+        engineLogger.info(
+          "FlowRobot",
+          "Saldo real carregado — ROBOT READY. Iniciando ciclo de operações.",
+          {},
+        );
+        this._scheduleNextOperation(10, "STARTUP");
       })
       .catch((err) => {
-        engineLogger.warn("FlowRobot", "Falha ao carregar saldo real no startup — tentando novamente em 10s", {
-          error: String(err),
-        });
+        engineLogger.warn(
+          "FlowRobot",
+          "Falha ao carregar saldo real no startup — tentando novamente em 10s",
+          {
+            error: String(err),
+          },
+        );
         // Tenta novamente após delay; só inicia operações quando conseguir saldo real
         setTimeout(() => {
           this._refreshBalance()
             .then(() => {
               this._startBalanceRefresh(30000);
-              engineLogger.info("FlowRobot", "Saldo real carregado na retentativa — ROBOT READY.", {});
-              this._scheduleNextOperation(10);
+              engineLogger.info(
+                "FlowRobot",
+                "Saldo real carregado na retentativa — ROBOT READY.",
+                {},
+              );
+              this._scheduleNextOperation(10, "STARTUP");
             })
             .catch(() => {
               // Falha persistente — agenda verificação periódica mas NÃO inicia operações
@@ -567,13 +740,17 @@ export class FlowRobotEngine {
       .then(() => {
         this._startBalanceRefresh(30000);
         engineLogger.info("FlowRobot", "Saldo real finalmente carregado — ROBOT READY.", {});
-        this._scheduleNextOperation(10);
+        this._scheduleNextOperation(10, "STARTUP");
       })
       .catch(() => {
         if (retryCount < 10) {
           setTimeout(() => this._retryInitialBalance(retryCount + 1), 10000);
         } else {
-          engineLogger.error("FlowRobot", "Falha persistente ao obter saldo real após 10 tentativas. Robô não iniciará.", {});
+          engineLogger.error(
+            "FlowRobot",
+            "Falha persistente ao obter saldo real após 10 tentativas. Robô não iniciará.",
+            {},
+          );
           this._setError("Não foi possível obter saldo real da Puma após múltiplas tentativas.");
         }
       });
@@ -592,6 +769,7 @@ export class FlowRobotEngine {
     this._state.status = "stopped";
     this._state.activeOperation = null;
     this._state.nextTrade = null;
+    this._logState("STOPPED");
     this.assetCooldowns.clear();
     this._globalCooldownUntil = 0;
     this.smartRecovery.stopSession();
@@ -612,6 +790,7 @@ export class FlowRobotEngine {
     }
     this._state.status = "paused";
     this._state.nextTrade = null;
+    this._logState("PAUSED");
     this.smartRecovery.pauseSession();
     this._emit("status-changed");
     this._emitAnalyst("robot.paused");
@@ -620,11 +799,12 @@ export class FlowRobotEngine {
   resume(): void {
     if (this._state.status !== "paused") return;
     this._state.status = "running";
+    this._logState("RESUMED");
     this.smartRecovery.resumeSession();
     this._emit("status-changed");
     this._emitAnalyst("robot.resumed");
     this.executionEngine.start();
-    this._scheduleNextOperation(5);
+    this._scheduleNextOperation(5, "STARTUP");
   }
 
   reset(): void {
@@ -804,8 +984,10 @@ export class FlowRobotEngine {
     });
 
     // 2. Reconstruir lista de ativos na config, respeitando seleção do usuário
-    const currentAssets = this._state.config.assets?.length ? this._state.config.assets : info.activeAssets;
-    this._state.config.assets = currentAssets.filter(a => info.activeAssets.includes(a));
+    const currentAssets = this._state.config.assets?.length
+      ? this._state.config.assets
+      : info.activeAssets;
+    this._state.config.assets = currentAssets.filter((a) => info.activeAssets.includes(a));
     if (this._state.config.assets.length === 0) {
       this._state.config.assets = info.activeAssets;
     }
@@ -842,11 +1024,14 @@ export class FlowRobotEngine {
         this._onCandleClose(candle),
       );
 
-      this._scheduleNextOperation(3);
+      this._scheduleNextOperation(3, "SESSION_CHANGED");
     }
   }
 
   private _onCandleClose(candle: Candle): void {
+    console.log(
+      `[TIMING] CANDLE_CLOSE symbol=${candle.asset} time=${candle.time} open=${candle.open} close=${candle.close} tsDate=${Date.now()}`
+    );
     latencyTracker.mark("candle_closed", "Candle Closed", {
       asset: candle.asset,
       time: candle.time,
@@ -900,6 +1085,43 @@ export class FlowRobotEngine {
       close: candle.close,
     });
 
+    // ── BUFFER VISUAL: emit real-time buffer progress on every candle ──
+    {
+      const bufStatus = this.broker.getBufferStatus();
+      const bufEntry = bufStatus.find((b) => b.key === candle.asset);
+      const profile = this._state.config.operationProfile ?? "AUTO";
+      const capacity = profile === "HYBRID_PROBABILITY" ? 2000 : profile === "HYBRID_FLOW" ? 300 : 500;
+      const minimum = getMinCandles(profile);
+      if (bufEntry) {
+        const current = bufEntry.count;
+        const percent = Math.min(100, Math.round((current / capacity) * 100));
+        this._emitMarketUpdate({
+          bufferVisual: { current, capacity, minimum, percent },
+        });
+
+        // ── PER-ASSET BUFFER HEALTH ──
+        const lastTimeMs = bufEntry.lastTime !== "N/A" ? new Date(bufEntry.lastTime).getTime() : 0;
+        const now = Date.now();
+        const secondsWithout = lastTimeMs > 0 ? Math.round((now - lastTimeMs) / 1000) : 999;
+        const isReceiving = secondsWithout < 3;
+        const bufferHealth: "live" | "waiting" | "stale" = secondsWithout < 3 ? "live" : secondsWithout < 10 ? "waiting" : "stale";
+        const bufferStatus = isReceiving ? "Recebendo candles" : secondsWithout < 10 ? "Aguardando proximo candle" : `Buffer desatualizado (${secondsWithout}s)`;
+
+        analystBus.emit("buffer.asset.update" as AnalystEventType, {
+          asset: candle.asset,
+          current,
+          capacity,
+          minimum,
+          percent,
+          lastCandleTime: lastTimeMs,
+          secondsWithoutCandles: secondsWithout,
+          isReceiving,
+          bufferHealth,
+          bufferStatus,
+        });
+      }
+    }
+
     // _onCandleClose NÃO gera nextTrade — apenas sincroniza estado.
     // A decisão de trade é responsabilidade EXCLUSIVA de _onDecisionTime.
     // Isso elimina a race condition onde a análise pós-fechamento sobrescrevia
@@ -907,12 +1129,20 @@ export class FlowRobotEngine {
     if (this._state.status === "running" && !this._state.activeOperation) {
       // Se há um nextTrade pendente definido por _onDecisionTime, não faz nada
       if (this._state.nextTrade?.valid) {
-        engineLogger.info("FlowRobot", `Candle fechado — nextTrade #${this._state.nextTrade.decisionId} aguardando execução`, {});
+        engineLogger.info(
+          "FlowRobot",
+          `Candle fechado — nextTrade #${this._state.nextTrade.decisionId} aguardando execução`,
+          {},
+        );
         return;
       }
       // Sem nextTrade — apenas log, sem análise.
       // _onDecisionTime cuidará da próxima janela.
-      engineLogger.info("FlowRobot", "Candle fechado — sem nextTrade. Aguardando próxima janela de decisão.", {});
+      engineLogger.info(
+        "FlowRobot",
+        "Candle fechado — sem nextTrade. Aguardando próxima janela de decisão.",
+        {},
+      );
       FlowRobotEngine._pendingCandleClose = false;
     } else if (this._state.status === "running" && FlowRobotEngine._isProcessing) {
       engineLogger.info("FlowRobot", "Candle fechado durante processamento — ignorado.", {});
@@ -927,24 +1157,89 @@ export class FlowRobotEngine {
    * o resultado como nextTrade para execução na abertura do candle.
    */
   private async _onDecisionTime(): Promise<void> {
-    try {
-      if (this._state.status !== "running") {
-        console.log("[DUPLICATE CHECK] _onDecisionTime ignored — status not running:", this._state.status);
-        return;
-      }
-      if (FlowRobotEngine._isProcessing) {
-        console.log("[DUPLICATE CHECK] _onDecisionTime ignored — _isProcessing=true");
-        return;
-      }
+    const decisionTraceId = this._state.nextTrade?.traceId ?? makeTraceId();
+    const _asset = this._state.config.asset;
+    const _tf = this._state.selectedTimeframe ?? this._state.config.timeframes?.[0] ?? "?";
+    const _profile = this._state.config.operationProfile ?? "?";
 
-      // Se há uma operação ativa (aguardando resultado), não toma nova decisão
-      if (this._state.activeOperation) {
-        engineLogger.info("FlowRobot", "Operação ativa pendente — pulando janela de decisão", {});
+    const tl = DecisionTimeline.start(decisionTraceId);
+    tl.event("SCHEDULER", { asset: _asset, tf: _tf, profile: _profile, status: this._state.status });
+
+    engineLogger.info("FlowRobot", `[DECISION] ENTRY — asset=${_asset} tf=${_tf} profile=${_profile}`, {
+      traceId: decisionTraceId,
+      hasActiveOp: !!this._state.activeOperation,
+      hasNextTrade: !!this._state.nextTrade,
+      status: this._state.status,
+      isProcessing: FlowRobotEngine._isProcessing,
+    });
+    schedulerMetrics.recordDecision();
+
+    const _exitLog = (status: DecisionExitStatus, extra?: Record<string, unknown>) => {
+      tl.end(status, extra);
+      tl.log();
+      engineLogger.info("FlowRobot", `[DECISION] EXIT — status=${status} asset=${_asset} tf=${_tf}`, {
+        status,
+        traceId: decisionTraceId,
+        ...extra,
+      });
+      if (status === "APPROVED") schedulerMetrics.recordApproved();
+      else if (status.startsWith("BLOCKED")) {
+        const reason = (extra?.reason as string) ?? status.replace("BLOCKED_", "");
+        schedulerMetrics.recordBlockedReason(reason);
+      }
+      else if (status === "ERROR") schedulerMetrics.recordError();
+    };
+
+    try {
+      const t0 = performance.now();
+      const tsDate = Date.now();
+      const tsClock = this.executionEngine.clock.now;
+      console.log(`[AUDIT] [FLOW_START] local=${new Date().toISOString()} perf=${t0}`);
+      console.log(
+        `[TIMING] DECISION_TIME_START asset=${_asset} tf=${_tf} status=${this._state.status} tsDate=${tsDate} tsClock=${tsClock} tsPerf=${t0.toFixed(2)}`
+      );
+      
+      const _ts = new Date().toLocaleTimeString("pt-BR");
+      engineLogger.info("FlowRobot", "===== DECISION START =====");
+      console.log("NEXT_TRADE =", this._state.nextTrade);
+      console.log(
+        `[FLOW DIAG] ${_ts} ═══ _onDecisionTime chamado ═══ asset=${_asset} tf=${_tf} profile=${_profile} status=${this._state.status} session=${this._state.currentSession}`,
+      );
+
+      if (this._state.status !== "running") {
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: status !== "running" ═══ status=${this._state.status} asset=${this._state.config.asset}`,
+        );
+        console.log(
+          "[DUPLICATE CHECK] _onDecisionTime ignored — status not running:",
+          this._state.status,
+        );
+        _exitLog("BLOCKED_STATUS", { status: this._state.status });
         return;
       }
+      engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU status");
+      if (FlowRobotEngine._isProcessing) {
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: _isProcessing=true ═══ asset=${this._state.config.asset}`,
+        );
+        console.log("[DUPLICATE CHECK] _onDecisionTime ignored — _isProcessing=true");
+        _exitLog("BLOCKED_PROCESSING");
+        return;
+      }
+      engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU _isProcessing");
+      if (this._state.activeOperation) {
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: activeOperation pendente ═══ orderId=${this._state.activeOperation.orderId} asset=${this._state.config.asset}`,
+        );
+        engineLogger.info("FlowRobot", "Operação ativa pendente — pulando janela de decisão", {});
+        _exitLog("BLOCKED_ACTIVE_OP", { orderId: this._state.activeOperation.orderId });
+        return;
+      }
+      engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU activeOperation");
 
       // TRAVA MUTEX: impede _runOperationCycle de rodar concorrentemente
       FlowRobotEngine._isProcessing = true;
+      tl.event("MUTEX_ACQUIRED");
 
       engineLogger.info("FlowRobot", `═══ JANELA DE DECISÃO (~200ms antes do fechamento) ═══`, {});
 
@@ -957,32 +1252,92 @@ export class FlowRobotEngine {
       const srStopped = this.smartRecovery.isStopped();
 
       if (profit >= cfgTp) {
-        console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: true, reason: "Meta de lucro atingida!", currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+        console.log("[STOP CHECK]", {
+          initialBankroll: initBk,
+          currentBankroll: crrBk,
+          profit,
+          stopLoss: cfgSl,
+          targetProfit: cfgTp,
+          shouldStop: true,
+          reason: "Meta de lucro atingida!",
+          currentLevel: this.smartRecovery.getState().currentLevel,
+          dailyLoss: this.smartRecovery.getState().dailyLoss,
+        });
         this._stopByRisk("Meta de lucro atingida!");
+        _exitLog("BLOCKED_RISK", { reason: "PROFIT_TARGET" });
         return;
       }
+      engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU risk");
       if (-profit >= cfgSl) {
-        console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: true, reason: "Stop loss atingido!", currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+        const srState = this.smartRecovery.getState();
+        console.log("[STOP CHECK]", {
+          initialBankroll: initBk,
+          currentBankroll: crrBk,
+          profit,
+          stopLoss: cfgSl,
+          targetProfit: cfgTp,
+          shouldStop: true,
+          reason: "Stop loss atingido!",
+          currentLevel: srState.currentLevel,
+          dailyLoss: srState.dailyLoss,
+          isStopAtingido: srState.isStopAtingido,
+          phase: srState.phase,
+        });
         this._stopByRisk("Stop loss atingido!");
+        _exitLog("BLOCKED_RISK", { reason: "STOP_LOSS" });
         return;
       }
       if (srStopped) {
-        console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: true, reason: "smartRecovery.isStopped()", sorosPhase: this.smartRecovery.getState().phase, dailyLoss: this.smartRecovery.getState().dailyLoss, consecutiveLosses: this.smartRecovery.getState().consecutiveLosses });
+        const srState = this.smartRecovery.getState();
+        console.log("[STOP CHECK]", {
+          initialBankroll: initBk,
+          currentBankroll: crrBk,
+          profit,
+          stopLoss: cfgSl,
+          targetProfit: cfgTp,
+          shouldStop: true,
+          reason: "smartRecovery.isStopped()",
+          sorosPhase: srState.phase,
+          dailyLoss: srState.dailyLoss,
+          consecutiveLosses: srState.consecutiveLosses,
+          isStopAtingido: srState.isStopAtingido,
+        });
         this._stopByRisk("Saldo insuficiente para continuar.");
+        _exitLog("BLOCKED_RISK", { reason: "SMART_RECOVERY_STOPPED" });
         return;
       }
-      console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: false, srStopped, currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+      engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU smartRecovery");
+      tl.event("RISK_CHECK", { profit: profit.toFixed(2), bankroll: crrBk });
+      console.log("[STOP CHECK]", {
+        initialBankroll: initBk,
+        currentBankroll: crrBk,
+        profit,
+        stopLoss: cfgSl,
+        targetProfit: cfgTp,
+        shouldStop: false,
+        srStopped,
+        currentLevel: this.smartRecovery.getState().currentLevel,
+        dailyLoss: this.smartRecovery.getState().dailyLoss,
+      });
 
       // Demo daily limit
       const tradesToday = this._countTradesToday();
       if (tradesToday >= DEMO_DAILY_LIMIT) {
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: cooldown");
         this._stopByRisk("Limite diário da conta demo atingido (50 trades).");
+        _exitLog("BLOCKED_RISK", { reason: "DEMO_DAILY_LIMIT", tradesToday });
         return;
       }
+      engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU entryValue");
 
       // Se já temos nextTrade válido (definido pelo ciclo anterior), não recalcula
       if (this._state.nextTrade?.valid) {
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: payout");
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: nextTrade já válido ═══ direction=${this._state.nextTrade.direction} asset=${this._state.config.asset}`,
+        );
         engineLogger.info("FlowRobot", "NextTrade já definido — mantendo decisão anterior", {});
+        _exitLog("BLOCKED_DUPLICATE", { nextDirection: this._state.nextTrade.direction });
         return;
       }
 
@@ -995,27 +1350,144 @@ export class FlowRobotEngine {
         stake: entrada.valor,
         isSoros: entrada.isSoros,
       });
-      if (entrada.valor <= 0) return;
+      if (entrada.valor <= 0) {
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: activeOperation");
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: entrada.valor <= 0 ═══ valor=${entrada.valor} level=${entrada.level} asset=${this._state.config.asset}`,
+        );
+        this._scheduleNextOperation(this._getIntervalSeconds(), "INVALID_ENTRY");
+        _exitLog("BLOCKED_INVALID_ENTRY", { valor: entrada.valor, level: entrada.level });
+        return;
+      }
 
       // Health check pré-scan
       await this._runHealthCheck();
+      tl.event("HEALTH_CHECK");
 
       // Analyze market direction
+      engineLogger.info("FlowRobot", "===== BEFORE ANALYZE =====");
+      const tAnalyze0 = performance.now();
+      console.log(
+        `[TIMING] BEFORE_ANALYZE asset=${this._state.config.asset} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+      );
       const marketDir = await this._analyzeMarketDirection();
+      const msAnalyze = performance.now() - tAnalyze0;
+      tl.event("ANALYZE", { direction: marketDir ?? "null" }, msAnalyze);
+      engineLogger.info("FlowRobot", "===== AFTER ANALYZE =====", { direction: marketDir });
+      console.log(
+        `[TIMING] AFTER_ANALYZE asset=${this._state.config.asset} direction=${marketDir} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+      );
+
+      // ══ SIGNAL LOG: registra toda análise HYBRID_PROBABILITY ══
+      if (
+        this._state.config.operationProfile === "HYBRID_PROBABILITY" &&
+        this._state.lastAnalysis?.hybridProbability
+      ) {
+        const hp = this._state.lastAnalysis.hybridProbability;
+        const cfg: Partial<HybridProbabilityConfig> =
+          this._state.config.hybridProbabilityConfig ?? {};
+        const logAsset = this._state.config.asset;
+        const logTimeframe = this._state.selectedTimeframe ?? this._state.config.timeframes[0];
+        const signalEntry = signalLogger.log({
+          engineVersion: ENGINE_VERSION,
+          databaseVersion: DATABASE_VERSION,
+          patternCatalogVersion: PATTERN_CATALOG_VERSION,
+          asset: logAsset,
+          timeframe: logTimeframe,
+          status: hp.signalStatus,
+          direction: hp.direction,
+          blockedReasons: hp.blockedReasons,
+          setup: hp.setup,
+          indicators: hp.indicators,
+          pattern: {
+            id: "continuity-2c",
+            name: "2 Candle Continuation",
+            occurrences: hp.historicalPatterns,
+            winRate: hp.historicalWinrate ?? 0,
+            confidence: hp.probabilityScore.breakdown.confidence,
+          },
+          scores: {
+            technicalScore: hp.technicalScore.total,
+            probabilityScore: hp.probabilityScore.total,
+            decisionScore: hp.decisionScore.total,
+            probabilityWeight: cfg.probabilityWeight ?? 0.2,
+          },
+          filters: hp.signalFilters,
+          config: {
+            flowIndexWindow: cfg.flowIndexWindow ?? 20,
+            historySize: cfg.historySize ?? 2000,
+            probabilityWeight: cfg.probabilityWeight ?? 0.2,
+            minScore: cfg.minScore ?? 75,
+            adxMin: cfg.adxMin ?? 25,
+            atrMin: cfg.atrMin ?? 1.0,
+            ema200Enabled: cfg.ema200Enabled ?? true,
+            flowIndexMin: cfg.flowIndexMin ?? 0.55,
+          },
+          candlesUsed: hp.candlesUsed ?? 0,
+          processingTimeMs: hp.processingTimeMs,
+          result: null,
+          orderId: null,
+          decisionId: null,
+          decisionTree: hp.decisionTree,
+        });
+        this._lastSignalLogId = signalEntry.id;
+        engineLogger.info(
+          "FlowRobot",
+          `📋 Signal logged: ${hp.signalStatus} — ${logAsset} ${logTimeframe}`,
+          {
+            signalId: signalEntry.id,
+            decisionScore: hp.score,
+            status: hp.signalStatus,
+          },
+        );
+      }
       if (!marketDir) {
-        engineLogger.info("FlowRobot", "Sem sinal na janela de decisão", {});
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: analyzeMarketDirection");
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: _analyzeMarketDirection retornou null ═══ asset=${this._state.config.asset} profile=${this._state.config.operationProfile} session=${this._state.currentSession}`,
+        );
+        engineLogger.info("FlowRobot", "Sem sinal na janela de decisão — reagendando próximo ciclo", {});
+        this._scheduleNextOperation(this._getIntervalSeconds(), "NO_SIGNAL");
+        _exitLog("BLOCKED_NO_SIGNAL", {});
         return;
       }
+
+      console.log(
+        `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ SINAL ENCONTRADO ═══ direction=${marketDir} asset=${this._state.config.asset} profile=${this._state.config.operationProfile}`,
+      );
 
       // ══ COOLDOWN GLOBAL na janela de decisão ══
       const cooldownRemaining = this._globalCooldownUntil - Date.now();
       if (cooldownRemaining > 0) {
-        engineLogger.info("FlowRobot", `⏳ Cooldown global ativo na janela de decisão — ${Math.ceil(cooldownRemaining / 1000)}s restantes`, {});
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: cooldown");
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: cooldown global ativo ═══ remaining=${Math.ceil(cooldownRemaining / 1000)}s asset=${this._state.config.asset}`,
+        );
+        engineLogger.info(
+          "FlowRobot",
+          `⏳ Cooldown global ativo na janela de decisão — ${Math.ceil(cooldownRemaining / 1000)}s restantes — reagendando`,
+          {},
+        );
+        this._scheduleNextOperation(Math.ceil(cooldownRemaining / 1000) + 1, "COOLDOWN_ACTIVE");
+        _exitLog("BLOCKED_COOLDOWN", { cooldownRemaining: Math.ceil(cooldownRemaining / 1000) });
         return;
       }
 
-      const asset = this._state.config.asset;
       const selectedTimeframe = this._state.selectedTimeframe ?? this._state.config.timeframes[0];
+      const asset = this._state.config.asset;
+
+      // Log stage timings from DecisionResult to timeline
+      if (this._state.lastAnalysis?.stageTimings) {
+        const st = this._state.lastAnalysis.stageTimings;
+        tl.stageTiming("STAGE_TIMING", {
+          Trend: st.trend,
+          Structure: st.structure,
+          PriceAction: st.priceAction,
+          SmartMoney: st.smartMoney,
+          Momentum: st.momentum,
+          Score: st.score,
+        }, st.total);
+      }
       const expiration =
         TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
       const entryPrice = (() => {
@@ -1028,19 +1500,43 @@ export class FlowRobotEngine {
       })();
       const payout = await this.broker.getPayout(asset).catch(() => 0.85);
       const score = this._state.lastAnalysis?.probability?.total ?? 0;
+      tl.event("SIGNAL", { direction: marketDir, score, asset, tf: selectedTimeframe });
 
       // Re-verificação PÓS-AWAIT: descarta sinal se ordem já foi executada durante a análise
       if (this._state.activeOperation || this._state.status !== "running") {
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: cooldown");
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: pós-análise race condition ═══ hasActiveOp=${!!this._state.activeOperation} status=${this._state.status} asset=${this._state.config.asset}`,
+        );
         engineLogger.info("FlowRobot", "Ordem executada durante análise — sinal descartado", {
           hasActiveOp: !!this._state.activeOperation,
           status: this._state.status,
         });
+        _exitLog("BLOCKED_RACE_CONDITION", { hasActiveOp: !!this._state.activeOperation, status: this._state.status });
         return;
       }
 
       // Armazena decisão como nextTrade (NÃO envia ordem ainda)
       const did = this._nextDecisionId();
+      const traceId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const signalCandle = (() => {
+        const analysisCandles = this._state.lastAnalysis?.candles;
+        return analysisCandles && analysisCandles.length > 0 ? analysisCandles[analysisCandles.length - 1] : null;
+      })();
+      const signalCandleTime = signalCandle?.time ?? 0;
+      const signalCandleOpen = signalCandle?.open ?? 0;
+      const signalCandleClose = signalCandle?.close ?? 0;
+      const candleId = `${asset}_${selectedTimeframe}_${signalCandleTime}`;
+      const nowTs = Date.now();
+      const clockNow = this.executionEngine.clock.now;
+      const perfNow = performance.now();
+
+      console.log(
+        `[TIMING] DECISION_START traceId=${traceId} asset=${asset} tf=${selectedTimeframe} dir=${marketDir} signalCandleTime=${signalCandleTime} signalCandleClose=${signalCandleClose} tsDate=${nowTs} tsClock=${clockNow} tsPerf=${perfNow.toFixed(2)}`
+      );
+
       const nextTrade: NextTrade = {
+        traceId,
         decisionId: did,
         symbol: asset,
         direction: marketDir,
@@ -1051,29 +1547,53 @@ export class FlowRobotEngine {
         payout,
         timeframe: selectedTimeframe,
         valid: true,
-        decidedAt: Date.now(),
+        decidedAt: nowTs,
+        signalCandleTime,
+        signalCandleOpen,
+        signalCandleClose,
+        candleId,
       };
       latencyTracker.mark("order_created", "Order Created (decision window)", {
+        traceId,
         asset,
         direction: marketDir,
         score,
         decisionId: did,
+        signalCandleTime,
+        candleId,
       });
       latencyTracker.beginTrade(`trade-${did}`);
 
       console.log("[FLOW SEND]", {
+        traceId,
         decisionId: did,
         amount: entrada.valor,
         level: entrada.level,
         entry: entrada.entry,
         direction: marketDir,
         score,
+        signalCandleTime,
+        candleId,
       });
+      console.log("1 Melhor Trade", nextTrade);
+      console.log("2 Antes do setNextTrade");
+      const t1 = performance.now();
+      console.log(`[AUDIT] [FLOW_END] asset=${asset} decisionId=${did} perf=${t1}`);
+      console.log(
+        `[TIMING] BEFORE_SET_NEXT_TRADE traceId=${traceId} asset=${asset} dir=${marketDir} signalCandle=${signalCandleTime} tsDate=${Date.now()} tsPerf=${t1.toFixed(2)}`
+      );
       this.executionEngine.setNextTrade(nextTrade);
+      tl.event("NEXT_TRADE_SET", { decisionId: did, direction: marketDir, stake: entrada.valor });
+      console.log(
+        `[TIMING] AFTER_SET_NEXT_TRADE traceId=${traceId} asset=${asset} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+      );
+      console.log("3 Depois do setNextTrade");
+      console.log("4 executionEngine.nextTrade", this.executionEngine.nextTrade);
       latencyTracker.mark("order_queued", "Order Queued");
       this._state.nextTrade = nextTrade;
       this._state.currentEntry = entrada.valor;
       this._state.entryNumber = entrada.entry;
+      this._logState("NEXT_TRADE_SET", { direction: marketDir, score, stake: entrada.valor });
       this._emit("state-changed");
 
       // ══ DECISION CONTEXT ══
@@ -1085,7 +1605,9 @@ export class FlowRobotEngine {
         });
         this._decisionHistory.push(this._lastDecisionContext);
         if (this._decisionHistory.length > FlowRobotEngine.MAX_DECISION_HISTORY) {
-          this._decisionHistory = this._decisionHistory.slice(-FlowRobotEngine.MAX_DECISION_HISTORY);
+          this._decisionHistory = this._decisionHistory.slice(
+            -FlowRobotEngine.MAX_DECISION_HISTORY,
+          );
         }
         this._emitDecisionContext(this._lastDecisionContext);
       }
@@ -1102,7 +1624,11 @@ export class FlowRobotEngine {
       const decidedTime = nextTrade.decidedAt;
       const decisionCandle = Math.floor(decidedTime / 60000) * 60000;
       const executionCandle = decisionCandle + 60000;
-      const candleLabel = new Date(decisionCandle).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", hour12: false });
+      const candleLabel = new Date(decisionCandle).toLocaleTimeString("pt-BR", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
       console.log("[DECISION TRACE]", {
         decisionId: did,
         asset,
@@ -1116,12 +1642,23 @@ export class FlowRobotEngine {
         FVG: decisionAnalysis?.smartMoney?.fvg !== null,
         Liquidity: decisionAnalysis?.smartMoney?.liquiditySweep !== null,
         Score: decisionAnalysis?.scoreBreakdown?.total,
-        filters: decisionAnalysis?.scoreBreakdown?.filters?.map(f => `${f.name}=${f.points}/${f.maxPoints}`).join(", ") ?? "N/A",
+        filters:
+          decisionAnalysis?.scoreBreakdown?.filters
+            ?.map((f) => `${f.name}=${f.points}/${f.maxPoints}`)
+            .join(", ") ?? "N/A",
+      });
+      _exitLog("APPROVED", {
+        decisionId: did,
+        direction: marketDir,
+        score,
+        stake: entrada.valor,
+        traceId,
       });
     } catch (err) {
       engineLogger.error("FlowRobot", "Erro na janela de decisão", {
         error: String(err),
       });
+      _exitLog("ERROR", { error: String(err) });
     } finally {
       FlowRobotEngine._isProcessing = false;
     }
@@ -1138,7 +1675,7 @@ export class FlowRobotEngine {
     });
 
     // NÃO recalcular nada aqui — apenas registrar
-    this._emitAnalyst("candle.new", { time });
+    this._emitAnalyst("candle.new", { symbol: this._state.config.asset, time });
   }
 
   /**
@@ -1183,6 +1720,7 @@ export class FlowRobotEngine {
 
     this._state.activeOperation = operation;
     this._state.status = "waiting-result";
+    this._logState("WAITING_RESULT", { orderId: operation.orderId });
     this._emit("operation-opened", operation);
 
     const tradeExpiration =
@@ -1195,17 +1733,20 @@ export class FlowRobotEngine {
 
     // Aguarda resultado
     try {
-      let finalStatus = await this.broker.waitForTradeResult(
+      const result = await this.broker.waitForTradeResult(
         record.tradeId,
         (tradeExpiration + 15) * 1000,
       );
+      let finalStatus = result.status;
+      let brokerProfit = result.profit;
       console.log("[TRADE STATUS]", {
         tradeId: record.tradeId,
         oldStatus: "PENDING",
         newStatus: finalStatus,
+        profit: brokerProfit,
       });
       console.log(
-        `[DEBUG-TRADE] 🤖 flow-robot-engine: finalStatus=${finalStatus} for tradeId=${record.tradeId}`,
+        `[DEBUG-TRADE] 🤖 flow-robot-engine: finalStatus=${finalStatus}, profit=${brokerProfit} for tradeId=${record.tradeId}`,
       );
       latencyTracker.mark("trade_result", "Trade Result", {
         tradeId: record.tradeId,
@@ -1214,14 +1755,22 @@ export class FlowRobotEngine {
 
       // Se retornou ACTIVE, o resultado não foi resolvido ainda — faz retry com polling direto
       if (finalStatus === "ACTIVE") {
-        engineLogger.warn("FlowRobot", `⚠️ waitForTradeResult retornou ACTIVE — fazendo retry manual para ${record.tradeId}`, {});
+        engineLogger.warn(
+          "FlowRobot",
+          `⚠️ waitForTradeResult retornou ACTIVE — fazendo retry manual para ${record.tradeId}`,
+          {},
+        );
         for (let attempt = 0; attempt < 8; attempt++) {
           await new Promise((r) => setTimeout(r, 3000));
           try {
             const polled = await this.broker.getResult(record.tradeId);
-            if (polled !== "ACTIVE") {
-              finalStatus = polled;
-              engineLogger.info("FlowRobot", `✅ Retry manual resolveu: ${finalStatus}`, { tradeId: record.tradeId, attempt });
+            if (polled.status !== "ACTIVE") {
+              finalStatus = polled.status;
+              brokerProfit = polled.profit;
+              engineLogger.info("FlowRobot", `✅ Retry manual resolveu: ${finalStatus}`, {
+                tradeId: record.tradeId,
+                attempt,
+              });
               break;
             }
           } catch {
@@ -1229,7 +1778,11 @@ export class FlowRobotEngine {
           }
         }
         if (finalStatus === "ACTIVE") {
-          engineLogger.error("FlowRobot", `❌ Retry manual esgotou — trade ${record.tradeId} ainda ACTIVE. Tratando como DRAW temporário.`, {});
+          engineLogger.error(
+            "FlowRobot",
+            `❌ Retry manual esgotou — trade ${record.tradeId} ainda ACTIVE. Tratando como DRAW temporário.`,
+            {},
+          );
         }
       }
 
@@ -1247,16 +1800,30 @@ export class FlowRobotEngine {
         if (customResult) {
           engineLogger.info("FlowRobot", "Resultado sobrescrito por onTradeResult", {
             tradeId: record.tradeId,
-          brokerResult: finalStatus as "WIN" | "LOSS" | "DRAW" | "UNKNOWN",
+            brokerResult: finalStatus as "WIN" | "LOSS" | "DRAW" | "UNKNOWN",
             customResult,
           });
           effectiveStatus = customResult;
         }
       }
 
+      // DRAW detection: se broker retorna LOSS com profit=0, é empate
+      if (effectiveStatus === "LOSS" && brokerProfit === 0) {
+        engineLogger.info("FlowRobot", `🔄 DRAW detectado: status=LOSS mas profit=0. Tratando como DRAW.`, {
+          tradeId: record.tradeId,
+          finalStatus,
+          brokerProfit,
+        });
+        effectiveStatus = "DRAW";
+      }
+
       // UNKNOWN: trade não encontrada (404 do daemon) — não altera SorosGale
       if (effectiveStatus === "UNKNOWN") {
-        engineLogger.warn("FlowRobot", `⚠️ Resultado UNKNOWN para ${record.tradeId} — trade não localizada. Limpando fila sem alterar SorosGale.`, {});
+        engineLogger.warn(
+          "FlowRobot",
+          `⚠️ Resultado UNKNOWN para ${record.tradeId} — trade não localizada. Limpando fila sem alterar SorosGale.`,
+          {},
+        );
         operation.result = "unknown";
         operation.profit = 0;
         operation.status = "completed";
@@ -1266,8 +1833,13 @@ export class FlowRobotEngine {
         this._state.status = "running";
         persistOperations(this._state.operations);
         this._emit("operation-closed", operation);
-        this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
-        engineLogger.info("FlowRobot", `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após UNKNOWN`, {});
+        this._globalCooldownUntil =
+          Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+        engineLogger.info(
+          "FlowRobot",
+          `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após UNKNOWN`,
+          {},
+        );
         console.log("[EXECUTION QUEUE]", {
           decisionId: record.decisionId,
           tradeId: record.tradeId,
@@ -1279,9 +1851,15 @@ export class FlowRobotEngine {
       }
 
       // Previne duplicatas: se operação com o mesmo orderId já existe, não adiciona novamente
-      const existingOperationIndex = this._state.operations.findIndex(op => op.orderId === record.tradeId);
+      const existingOperationIndex = this._state.operations.findIndex(
+        (op) => op.orderId === record.tradeId,
+      );
       if (existingOperationIndex !== -1) {
-        engineLogger.warn("FlowRobot", `⚠️ Operação duplicada detectada para o mesmo orderId: ${record.tradeId}`, {});
+        engineLogger.warn(
+          "FlowRobot",
+          `⚠️ Operação duplicada detectada para o mesmo orderId: ${record.tradeId}`,
+          {},
+        );
         operation.result = "unknown";
         operation.profit = operation.profit; // Mantém o profit original ao invés de zerar
         operation.status = "completed";
@@ -1291,8 +1869,13 @@ export class FlowRobotEngine {
         this._state.status = "running";
         persistOperations(this._state.operations);
         this._emit("operation-closed", operation);
-        this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
-        engineLogger.info("FlowRobot", `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após DUPLICATA`, {});
+        this._globalCooldownUntil =
+          Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+        engineLogger.info(
+          "FlowRobot",
+          `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após DUPLICATA`,
+          {},
+        );
         console.log("[EXECUTION QUEUE]", {
           decisionId: record.decisionId,
           tradeId: record.tradeId,
@@ -1334,7 +1917,9 @@ export class FlowRobotEngine {
 
         this._state.sessionProfit += operation.profit;
         this._refreshBalance().catch((err) =>
-          engineLogger.error("FlowRobot", "Falha ao atualizar saldo após WIN", { error: String(err) }),
+          engineLogger.error("FlowRobot", "Falha ao atualizar saldo após WIN", {
+            error: String(err),
+          }),
         );
         this._state.currentEntry = winStake;
         this._state.entryNumber = this.smartRecovery.getState().entryNumber;
@@ -1374,7 +1959,9 @@ export class FlowRobotEngine {
         );
         this._state.sessionProfit -= operation.amount;
         this._refreshBalance().catch((err) =>
-          engineLogger.error("FlowRobot", "Falha ao atualizar saldo após LOSS", { error: String(err) }),
+          engineLogger.error("FlowRobot", "Falha ao atualizar saldo após LOSS", {
+            error: String(err),
+          }),
         );
         this._state.currentEntry = this.smartRecovery.getCurrentStake();
         this._state.entryNumber = this.smartRecovery.getState().entryNumber;
@@ -1413,7 +2000,11 @@ export class FlowRobotEngine {
       // Definido ANTES de limpar activeOperation/status para evitar race condition
       // com _runOperationCycle (que verifica cooldown antes de entrar)
       this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
-      engineLogger.info("FlowRobot", `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após trade`, {});
+      engineLogger.info(
+        "FlowRobot",
+        `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após trade`,
+        {},
+      );
 
       operation.status = "completed";
       operation.closedAt = new Date();
@@ -1448,7 +2039,9 @@ export class FlowRobotEngine {
         this._lastOperationContext = opCtx;
         this._operationHistory.unshift(opCtx);
         if (this._operationHistory.length > FlowRobotEngine.MAX_OPERATION_HISTORY) {
-          this._operationHistory = this._operationHistory.slice(-FlowRobotEngine.MAX_OPERATION_HISTORY);
+          this._operationHistory = this._operationHistory.slice(
+            -FlowRobotEngine.MAX_OPERATION_HISTORY,
+          );
         }
         this._emitOperationContext(opCtx);
 
@@ -1500,7 +2093,35 @@ export class FlowRobotEngine {
             aiDecision.action === "stop-session" ? "error" : "warning",
           );
           if (aiDecision.action === "stop-session") {
-            console.log("[STOP CHECK]", { initialBankroll: this._state.initialBankroll, currentBankroll: this._state.currentBankroll, profit: this._state.currentBankroll - this._state.initialBankroll, stopLoss: this._state.config.stopLoss, targetProfit: this._state.config.targetProfit, shouldStop: true, reason: `IA: ${aiDecision.reason}`, aiAction: aiDecision.action, aiConfidence: aiDecision.confidence, currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+            const srState = this.smartRecovery.getState();
+            console.log("[STOP CHECK]", {
+              initialBankroll: this._state.initialBankroll,
+              currentBankroll: this._state.currentBankroll,
+              profit: this._state.currentBankroll - this._state.initialBankroll,
+              stopLoss: this._state.config.stopLoss,
+              targetProfit: this._state.config.targetProfit,
+              shouldStop: true,
+              reason: `IA: ${aiDecision.reason}`,
+              aiAction: aiDecision.action,
+              aiConfidence: aiDecision.confidence,
+              currentLevel: srState.currentLevel,
+              dailyLoss: srState.dailyLoss,
+              consecutiveLosses: srState.consecutiveLosses,
+              phase: srState.phase,
+              isStopAtingido: srState.isStopAtingido,
+            });
+            engineLogger.warn(
+              "FlowRobot",
+              `[AI STOP-SESSION] Robot stopped by AI financial decision`,
+              {
+                reason: aiDecision.reason,
+                dailyLoss: srState.dailyLoss,
+                stopLoss: this._state.config.stopLoss,
+                consecutiveLosses: srState.consecutiveLosses,
+                phase: srState.phase,
+                isStopAtingido: srState.isStopAtingido,
+              },
+            );
             this._stopByRisk(`IA: ${aiDecision.reason}`);
             return;
           }
@@ -1511,6 +2132,21 @@ export class FlowRobotEngine {
 
       // Atualiza registro com resultado
       record.result = isWin ? "WIN" : isLoss ? "LOSS" : "DRAW";
+
+      // ══ SIGNAL LOG: atualiza resultado do trade ══
+      if (this._lastSignalLogId && this._state.config.operationProfile === "HYBRID_PROBABILITY") {
+        signalLogger.updateResult(
+          this._lastSignalLogId,
+          isWin ? "WIN" : isLoss ? "LOSS" : "DRAW",
+          record.tradeId,
+        );
+        engineLogger.info("FlowRobot", `📋 Signal result updated: ${record.result}`, {
+          signalId: this._lastSignalLogId,
+          tradeId: record.tradeId,
+          result: record.result,
+        });
+        this._lastSignalLogId = null;
+      }
 
       console.log("[DECISION RESULT]", {
         decisionId: record.decisionId,
@@ -1533,11 +2169,12 @@ export class FlowRobotEngine {
       latencyTracker.endTrade();
 
       // Agenda re-análise rápida durante o cooldown
-      this._scheduleNextOperation(5);
+      this._scheduleNextOperation(5, "COOLDOWN_ACTIVE");
     } catch (err) {
       this._state.activeOperation = null;
       this._state.status = "running";
       this._state.nextTrade = null;
+      this._logState("TRADE_ERROR", { error: String(err), tradeId: record.tradeId });
       this._state.currentEntry = this.smartRecovery.getCurrentStake();
       this._state.entryNumber = this.smartRecovery.getState().entryNumber;
       this._state.currentRecoveryStep = this.smartRecovery.getState().currentLevel;
@@ -1546,7 +2183,17 @@ export class FlowRobotEngine {
         tradeId: record.tradeId,
       });
       this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
-      this._scheduleNextOperation(5);
+      this._scheduleNextOperation(5, "COOLDOWN_ACTIVE");
+    } finally {
+      if (this._state.status === "waiting-result") {
+        this._state.status = "running";
+        this._state.activeOperation = null;
+        engineLogger.warn(
+          "FlowRobot",
+          "[FINALLY] Status was 'waiting-result' after _onEntryExecuted — reset to 'running'",
+          { tradeId: record.tradeId },
+        );
+      }
     }
   }
 
@@ -1562,13 +2209,34 @@ export class FlowRobotEngine {
     }).length;
   }
 
-  private _scheduleNextOperation(delaySecs: number): void {
+  private _scheduleNextOperation(delaySecs: number, reason: ScheduleReason = "VARIABLE_DELAY"): void {
     this._clearTimers();
-    if (this._state.status !== "running") return;
+    if (this._state.status !== "running") {
+      engineLogger.info("FlowRobot", `[SCHEDULER] BLOQUEADO — status=${this._state.status} (não agendando)`, { reason });
+      return;
+    }
+
+    const now = new Date();
+    const nextRun = new Date(now.getTime() + delaySecs * 1000);
+    const tf = this._state.selectedTimeframe ?? this._state.config.timeframes?.[0] ?? "?";
+    const traceId = this._state.nextTrade?.traceId ?? "none";
+
+    engineLogger.info("FlowRobot", `[SCHEDULER] reason=${reason} asset=${this._state.config.asset} tf=${tf} profile=${this._state.config.operationProfile ?? "?"}`, {
+      reason,
+      now: now.toLocaleTimeString("pt-BR"),
+      nextRun: nextRun.toLocaleTimeString("pt-BR"),
+      delaySecs,
+      asset: this._state.config.asset,
+      timeframe: tf,
+      profile: this._state.config.operationProfile ?? "?",
+      traceId,
+    });
+    schedulerMetrics.recordReschedule();
 
     // Se há candle fechado pendente, processa imediatamente
     if (FlowRobotEngine._pendingCandleClose) {
       FlowRobotEngine._pendingCandleClose = false;
+      engineLogger.info("FlowRobot", `[SCHEDULER] Candle pendente — executando imediatamente`, { reason });
       this._runOperationCycle().catch((err) =>
         engineLogger.error("FlowRobot", "Erro no ciclo por candle pendente", {
           error: String(err),
@@ -1638,7 +2306,7 @@ export class FlowRobotEngine {
         calculatorStake: entrada.valor,
       });
       FlowRobotEngine._isProcessing = false;
-      this._scheduleNextOperation(5);
+      this._scheduleNextOperation(5, "OPERATION_FINISHED");
       return;
     }
     if (this._state.nextTrade) {
@@ -1651,7 +2319,7 @@ export class FlowRobotEngine {
         calculatorEntry: entrada.entry,
       });
       FlowRobotEngine._isProcessing = false;
-      this._scheduleNextOperation(5);
+      this._scheduleNextOperation(5, "OPERATION_FINISHED");
       return;
     }
 
@@ -1668,15 +2336,57 @@ export class FlowRobotEngine {
     });
 
     // ══ VERIFICAÇÃO: Temos dados no buffer? ══
-    const hasData = bufferStatus.some((b) => b.count >= getMinCandles(b.key));
+    const currentProfile = this._state.config.operationProfile ?? "AUTO";
+    const currentMinCandles = getMinCandles(currentProfile);
+    // For HYBRID_PROBABILITY, only check hybrid Puma asset buffers
+    const relevantBuffers = currentProfile === "HYBRID_PROBABILITY"
+      ? bufferStatus.filter((b) => {
+          const assetKey = b.key.split(":")[0] ?? b.key;
+          return HYBRID_PUMA_ASSETS.has(assetKey.toUpperCase());
+        })
+      : bufferStatus;
+    const hasData = relevantBuffers.length > 0 && relevantBuffers.some((b) => b.count >= currentMinCandles);
     if (!hasData) {
       engineLogger.warn("FlowRobot", `⏳ Buffer SEM dados suficientes — aguardando candles`, {
         bufferKeys: bufferStatus.length,
-        details: bufferStatus.map((b) => `${b.key}=${b.count}`).join(", "),
-        reason: "WebSocket pode não estar enviando dados ou buffer ainda carregando",
+        relevantBuffers: relevantBuffers.length,
+        details: relevantBuffers.map((b) => `${b.key}=${b.count}`).join(", "),
+        profile: currentProfile,
+        reason: currentProfile === "HYBRID_PROBABILITY"
+          ? `Hybrid Puma assets precisam de ${currentMinCandles} candles cada`
+          : "WebSocket pode não estar enviando dados ou buffer ainda carregando",
       });
+      // ── BUFFER VISUAL: emitir progresso mesmo durante espera ──
+      const capacity = currentProfile === "HYBRID_PROBABILITY" ? 2000 : currentProfile === "HYBRID_FLOW" ? 300 : 500;
+      const maxCount = relevantBuffers.length > 0 ? Math.max(...relevantBuffers.map((b) => b.count)) : 0;
+      this._emitMarketUpdate({
+        bufferVisual: { current: maxCount, capacity, minimum: currentMinCandles, percent: Math.min(100, Math.round((maxCount / capacity) * 100)) },
+      });
+      // ── PER-ASSET BUFFER HEALTH for all relevant assets ──
+      {
+        const now = Date.now();
+        for (const buf of relevantBuffers) {
+          const lastTimeMs = buf.lastTime !== "N/A" ? new Date(buf.lastTime).getTime() : 0;
+          const secondsWithout = lastTimeMs > 0 ? Math.round((now - lastTimeMs) / 1000) : 999;
+          const isReceiving = secondsWithout < 3;
+          const bufferHealth: "live" | "waiting" | "stale" = secondsWithout < 3 ? "live" : secondsWithout < 10 ? "waiting" : "stale";
+          const bufferStatusText = isReceiving ? "Recebendo candles" : secondsWithout < 10 ? "Aguardando proximo candle" : `Buffer desatualizado (${secondsWithout}s)`;
+          analystBus.emit("buffer.asset.update" as AnalystEventType, {
+            asset: buf.key,
+            current: buf.count,
+            capacity,
+            minimum: currentMinCandles,
+            percent: Math.min(100, Math.round((buf.count / capacity) * 100)),
+            lastCandleTime: lastTimeMs,
+            secondsWithoutCandles: secondsWithout,
+            isReceiving,
+            bufferHealth,
+            bufferStatus: bufferStatusText,
+          });
+        }
+      }
       FlowRobotEngine._isProcessing = false;
-      this._scheduleNextOperation(5);
+      this._scheduleNextOperation(5, "INSUFFICIENT_DATA");
       return;
     }
 
@@ -1687,7 +2397,7 @@ export class FlowRobotEngine {
         reason: "Operações permitidas apenas em sessão aberta",
       });
       FlowRobotEngine._isProcessing = false;
-      this._scheduleNextOperation(60);
+      this._scheduleNextOperation(60, "OUTSIDE_SESSION");
       return;
     }
 
@@ -1708,25 +2418,71 @@ export class FlowRobotEngine {
       const srStopped = this.smartRecovery.isStopped();
 
       if (profit >= cfgTp) {
-        console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: true, reason: "Meta de lucro atingida!", currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+        console.log("[STOP CHECK]", {
+          initialBankroll: initBk,
+          currentBankroll: crrBk,
+          profit,
+          stopLoss: cfgSl,
+          targetProfit: cfgTp,
+          shouldStop: true,
+          reason: "Meta de lucro atingida!",
+          currentLevel: this.smartRecovery.getState().currentLevel,
+          dailyLoss: this.smartRecovery.getState().dailyLoss,
+        });
         this._emitAnalyst("risk.profit-target");
         this._stopByRisk("Meta de lucro atingida!");
         return;
       }
       if (-profit >= cfgSl) {
-        console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: true, reason: "Stop loss atingido!", currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+        const srState = this.smartRecovery.getState();
+        console.log("[STOP CHECK]", {
+          initialBankroll: initBk,
+          currentBankroll: crrBk,
+          profit,
+          stopLoss: cfgSl,
+          targetProfit: cfgTp,
+          shouldStop: true,
+          reason: "Stop loss atingido!",
+          currentLevel: srState.currentLevel,
+          dailyLoss: srState.dailyLoss,
+          isStopAtingido: srState.isStopAtingido,
+          phase: srState.phase,
+        });
         this._emitAnalyst("risk.stop-loss");
         this._stopByRisk("Stop loss atingido!");
         return;
       }
 
       if (srStopped) {
-        console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: true, reason: "smartRecovery.isStopped()", sorosPhase: this.smartRecovery.getState().phase, dailyLoss: this.smartRecovery.getState().dailyLoss, consecutiveLosses: this.smartRecovery.getState().consecutiveLosses });
+        const srState = this.smartRecovery.getState();
+        console.log("[STOP CHECK]", {
+          initialBankroll: initBk,
+          currentBankroll: crrBk,
+          profit,
+          stopLoss: cfgSl,
+          targetProfit: cfgTp,
+          shouldStop: true,
+          reason: "smartRecovery.isStopped()",
+          sorosPhase: srState.phase,
+          dailyLoss: srState.dailyLoss,
+          consecutiveLosses: srState.consecutiveLosses,
+          isStopAtingido: srState.isStopAtingido,
+        });
         this._emitAnalyst("risk.insufficient-balance");
         this._stopByRisk("Saldo insuficiente para continuar.");
         return;
       }
-      console.log("[STOP CHECK]", { initialBankroll: initBk, currentBankroll: crrBk, profit, stopLoss: cfgSl, targetProfit: cfgTp, shouldStop: false, srStopped, currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+      console.log("[STOP CHECK]", {
+        initialBankroll: initBk,
+        currentBankroll: crrBk,
+        profit,
+        stopLoss: cfgSl,
+        targetProfit: cfgTp,
+        shouldStop: false,
+        srStopped,
+        currentLevel: this.smartRecovery.getState().currentLevel,
+        dailyLoss: this.smartRecovery.getState().dailyLoss,
+      });
 
       // ── LIMITE DIÁRIO CONTA DEMO (50 trades/dia) ──
       const tradesToday = this._countTradesToday();
@@ -1769,6 +2525,9 @@ export class FlowRobotEngine {
         strength: lastAnalysis?.trend?.score ?? 0,
         score: lastAnalysis?.probability?.total ?? 0,
         confidence: this._state.lastAnalysis?.probability?.total ?? 0,
+        direction: lastAnalysis?.direction === "CALL" ? "call" : lastAnalysis?.direction === "PUT" ? "put" : null,
+        engineStatus: "analyzing",
+        profile: this._state.config.operationProfile ?? "AUTO",
       });
 
       engineLogger.info(
@@ -1797,7 +2556,11 @@ export class FlowRobotEngine {
       try {
         const aiDecision = this.smartRecovery.evaluateAIDecision();
         if (aiDecision.action === "pause" || aiDecision.action === "stop-session") {
-          engineLogger.warn("FlowRobot", `IA bloqueou entrada: ${aiDecision.action} — ${aiDecision.reason}`, {});
+          engineLogger.warn(
+            "FlowRobot",
+            `IA bloqueou entrada: ${aiDecision.action} — ${aiDecision.reason}`,
+            {},
+          );
           this._emitAnalyst("ai.blocked-entry", {
             action: aiDecision.action,
             reason: aiDecision.reason,
@@ -1809,20 +2572,33 @@ export class FlowRobotEngine {
             { text: `Confiança: ${aiDecision.confidence}%`, checked: true },
           ]);
           if (aiDecision.action === "stop-session") {
-            console.log("[STOP CHECK]", { initialBankroll: this._state.initialBankroll, currentBankroll: this._state.currentBankroll, profit: this._state.currentBankroll - this._state.initialBankroll, stopLoss: this._state.config.stopLoss, targetProfit: this._state.config.targetProfit, shouldStop: true, reason: `IA: ${aiDecision.reason}`, aiAction: aiDecision.action, aiConfidence: aiDecision.confidence, currentLevel: this.smartRecovery.getState().currentLevel, dailyLoss: this.smartRecovery.getState().dailyLoss });
+            const srState = this.smartRecovery.getState();
+            console.log("[STOP CHECK]", {
+              initialBankroll: this._state.initialBankroll,
+              currentBankroll: this._state.currentBankroll,
+              profit: this._state.currentBankroll - this._state.initialBankroll,
+              stopLoss: this._state.config.stopLoss,
+              targetProfit: this._state.config.targetProfit,
+              shouldStop: true,
+              reason: `IA: ${aiDecision.reason}`,
+              aiAction: aiDecision.action,
+              aiConfidence: aiDecision.confidence,
+              currentLevel: srState.currentLevel,
+              dailyLoss: srState.dailyLoss,
+              isStopAtingido: srState.isStopAtingido,
+              phase: srState.phase,
+            });
             this._stopByRisk(`IA: ${aiDecision.reason}`);
             return;
           }
-          this._emitDiaryEntry(
-            `IA bloqueou entrada: ${aiDecision.reason}`,
-            "⏸️",
-            "warning",
-          );
-          this._scheduleNextOperation(30);
+          this._emitDiaryEntry(`IA bloqueou entrada: ${aiDecision.reason}`, "⏸️", "warning");
+          this._scheduleNextOperation(30, "VARIABLE_DELAY");
           return;
         }
       } catch (err) {
-        engineLogger.error("FlowRobot", "Erro no evaluateAIDecision (ciclo)", { error: String(err) });
+        engineLogger.error("FlowRobot", "Erro no evaluateAIDecision (ciclo)", {
+          error: String(err),
+        });
       }
 
       let direction: OperationDirection;
@@ -1846,7 +2622,12 @@ export class FlowRobotEngine {
           `Stake: R$ ${entrada.valor.toFixed(2)}`,
         );
       } else {
-        this._emitAnalyst("analysis.started");
+        this._emitAnalyst("analysis.started", {
+          asset,
+          timeframe: this._state.selectedTimeframe ?? this._state.config.timeframes[0],
+          profile: this._state.config.operationProfile ?? "AUTO",
+          traceId: makeTraceId(),
+        });
         this._emitAnalystState("analyzing");
         this._emitAnalystReasoning([
           { text: "Escaneando mercado...", checked: true },
@@ -1867,7 +2648,10 @@ export class FlowRobotEngine {
         if (marketDir) {
           this._emitAnalystReasoning([
             { text: "Sinal encontrado, aguardando cooldown", checked: true },
-            { text: `Re-análise em 5s (cooldown: ${Math.ceil(cooldownRemaining / 1000)}s)`, checked: true },
+            {
+              text: `Re-análise em 5s (cooldown: ${Math.ceil(cooldownRemaining / 1000)}s)`,
+              checked: true,
+            },
           ]);
           this._emitAnalystNextAction(
             "Cooldown global ativo",
@@ -1875,8 +2659,12 @@ export class FlowRobotEngine {
             `Score: ${this._state.lastAnalysis?.probability?.total || 0}/100`,
           );
         }
-        engineLogger.info("FlowRobot", `⏳ Cooldown global: ${Math.ceil(cooldownRemaining / 1000)}s — análise ok, entrada bloqueada`, {});
-        this._scheduleNextOperation(5);
+        engineLogger.info(
+          "FlowRobot",
+          `⏳ Cooldown global: ${Math.ceil(cooldownRemaining / 1000)}s — análise ok, entrada bloqueada`,
+          {},
+        );
+        this._scheduleNextOperation(5, "COOLDOWN_ACTIVE");
         return;
       }
 
@@ -1938,7 +2726,7 @@ export class FlowRobotEngine {
             isRecovery,
             scanMode: this._state.config.scanMode,
           });
-          this._scheduleNextOperation(this._state.config.reAnalysisIntervalSec);
+          this._scheduleNextOperation(this._state.config.reAnalysisIntervalSec, "NO_SIGNAL");
           return;
         }
         direction = this._state.config.direction;
@@ -1948,12 +2736,16 @@ export class FlowRobotEngine {
       // O fluxo de análise para UI/statistics continua rodando, mas sem
       // sobrescrever a decisão da janela de decisão.
       const nt = this._state.nextTrade as import("./execution/types").NextTrade | null;
-      engineLogger.info("FlowRobot", "Ciclo de análise concluído (nextTrade NÃO foi definido — aguardando _onDecisionTime)", {
-        hasNextTrade: !!nt?.valid,
-        decisionId: nt?.decisionId,
-      });
+      engineLogger.info(
+        "FlowRobot",
+        "Ciclo de análise concluído (nextTrade NÃO foi definido — aguardando _onDecisionTime)",
+        {
+          hasNextTrade: !!nt?.valid,
+          decisionId: nt?.decisionId,
+        },
+      );
 
-      this._scheduleNextOperation(this._getIntervalSeconds());
+      this._scheduleNextOperation(this._getIntervalSeconds(), "OPERATION_FINISHED");
     } finally {
       FlowRobotEngine._isProcessing = false;
     }
@@ -2018,16 +2810,41 @@ export class FlowRobotEngine {
       timeframe: string;
     } | null = null;
 
-    for (const asset of assets) {
+    const profile = this.state.config.operationProfile ?? "AUTO";
+
+    // Filter assets by profile: HYBRID_PROBABILITY only scans Puma hybrid assets
+    const scanAssets = profile === "HYBRID_PROBABILITY"
+      ? assets.filter((a) => HYBRID_PUMA_ASSETS.has(a.toUpperCase()))
+      : assets;
+
+    const totalCatalogTargets = scanAssets.length * timeframes.length;
+    let scannedCount = 0;
+
+    for (const asset of scanAssets) {
       if (this._state.status !== "running") break;
+
+      const assetIndex = scanAssets.indexOf(asset);
+      const scanProgress = Math.round(((assetIndex) / scanAssets.length) * 100);
+      this._emitMarketUpdate({ asset, scanProgress, catalogProgress: { scanned: scannedCount, total: totalCatalogTargets }, engineStatus: "analyzing", profile });
+
+      const isForex = /^[A-Z]{6}$/.test(asset.toUpperCase()) && !["BTCUSD", "ETHUSD", "XAUUSD"].includes(asset.toUpperCase());
+      const isHybrid = ["BETHUSDT", "BTSOLUSDT", "MAPEUSDT", "XRDOGUSDT", "XRPSOLUSDT"].includes(asset.toUpperCase());
+
+      engineLogger.info("FlowRobot", `═══ SCAN ${asset} INÍCIO ═══ tipo=${isForex ? "FOREX" : isHybrid ? "HYBRID" : "OUTRO"}`, {
+        asset,
+        tipo: isForex ? "FOREX" : isHybrid ? "HYBRID" : "OUTRO",
+        profile: profile,
+        session: this._state.currentSession,
+      });
 
       // Skip assets em cooldown (após loss)
       const cooldownUntil = this.assetCooldowns.get(asset);
       if (cooldownUntil && Date.now() < cooldownUntil) {
         const remaining = Math.round((cooldownUntil - Date.now()) / 1000);
-        engineLogger.info("FlowRobot", `SCAN ${asset}: COOLDOWN — ${remaining}s restantes`, {});
+        engineLogger.warn("FlowRobot", `SCAN ${asset}: ✗ BLOQUEADO — COOLDOWN pós-loss (${remaining}s restantes)`, {});
         for (const tf of timeframes) {
           scanLog.push({
+            traceId: makeTraceId(),
             asset,
             score: 0,
             blocked: true,
@@ -2042,11 +2859,13 @@ export class FlowRobotEngine {
       // Check payout once per asset
       const payout = await this.broker.getPayout(asset).catch(() => null);
       if (!payout || payout < 0.7) {
-        engineLogger.warn("FlowRobot", `SCAN ${asset}: BLOQUEADO — payout`, {
+        engineLogger.warn("FlowRobot", `SCAN ${asset}: ✗ BLOQUEADO — PAYOUT insuficiente (payout=${payout ?? "null"}, mínimo=0.7)`, {
           payout: payout ?? "null",
+          motivo: `Payout ${payout ?? "null"} < 0.7`,
         });
         for (const tf of timeframes) {
           const entry: ScanLogEntry = {
+            traceId: makeTraceId(),
             asset,
             score: 0,
             blocked: true,
@@ -2060,25 +2879,31 @@ export class FlowRobotEngine {
       }
 
       // Timeframes em paralelo — cada um busca seus próprios candles na resolução correta
-      const minCandles = getMinCandles(asset);
+      const minCandles = getMinCandles(profile);
+      const fetchSize = getFetchSize(profile);
       const tfResults = await Promise.all(
         timeframes.map(async (tf) => {
           try {
             engineLogger.debug("FlowRobot", `SCAN ${asset} ${tf}: started`, {});
-            const candles = await this.broker.getCandles(asset, tf, 200);
+            const candles = await this.broker.getCandles(asset, tf, fetchSize);
             engineLogger.debug("FlowRobot", `SCAN ${asset} ${tf}: getCandles`, {
               count: candles.length,
               required: minCandles,
+              fetchSize,
               isHybrid: HYBRID_PUMA_ASSETS.has(asset.toUpperCase()),
             });
 
             if (!candles || candles.length < minCandles) {
-              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: BLOQUEADO — poucos dados`, {
+              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: ✗ BLOQUEADO — DADOS INSUFICIENTES (${candles?.length ?? 0}/${minCandles} candles, profile=${profile})`, {
                 count: candles?.length ?? 0,
+                required: minCandles,
+                profile,
+                motivo: `Candles ${candles?.length ?? 0} < mínimo ${minCandles} para profile ${profile}`,
               });
               return {
                 tf,
                 entry: {
+                  traceId: makeTraceId(),
                   asset,
                   score: 0,
                   blocked: true as const,
@@ -2095,23 +2920,41 @@ export class FlowRobotEngine {
               };
             }
 
-            const decision = this.decisionEngine.analyze(candles, asset);
+            const decision = this.decisionEngine.analyze(candles, asset, {
+              operationProfile: this.state.config.operationProfile,
+              hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
+              timeframe: tf,
+            });
             latencyTracker.mark("score_calculated", "Score Calculated", {
               asset,
               tf,
               score: decision.scoreBreakdown.total,
             });
 
+            this._emitAnalyst("score.updated", {
+              asset,
+              timeframe: tf,
+              score: decision.scoreBreakdown.total,
+              direction: decision.direction?.toLowerCase() ?? null,
+              blockedReasons: decision.blockedReason ? [decision.blockedReason] : [],
+              traceId: makeTraceId(),
+              band: decision.scoreBreakdown.bandLabel,
+              strategy: decision.scoreBreakdown.strategy,
+            });
+
             if (decision.blockedReason) {
-              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: BLOQUEADO`, {
-                score: decision.scoreBreakdown.total,
+              engineLogger.warn("FlowRobot", `SCAN ${asset} ${tf}: ✗ BLOQUEADO — ${decision.blockedRule ?? "REgra desconhecida"}`, {
+                score: `${decision.scoreBreakdown.total}/100`,
                 band: decision.scoreBreakdown.bandLabel,
                 rule: decision.blockedRule,
                 reason: decision.blockedReason,
+                profile,
+                motivo: `DecisionEngine bloqueou: ${decision.blockedReason}`,
               });
               return {
                 tf,
                 entry: {
+                  traceId: makeTraceId(),
                   asset,
                   score: decision.scoreBreakdown.total,
                   blocked: true as const,
@@ -2120,6 +2963,7 @@ export class FlowRobotEngine {
                   trend: decision.trend.direction ?? undefined,
                   pattern: decision.priceAction.pattern ?? undefined,
                   timeframe: tf,
+                  stageTimings: decision.stageTimings,
                 } as ScanLogEntry,
                 candidate: null,
               };
@@ -2142,6 +2986,7 @@ export class FlowRobotEngine {
               return {
                 tf,
                 entry: {
+                  traceId: makeTraceId(),
                   asset,
                   score,
                   blocked: false as const,
@@ -2151,6 +2996,7 @@ export class FlowRobotEngine {
                   pattern: decision.priceAction.pattern ?? undefined,
                   direction,
                   timeframe: tf,
+                  stageTimings: decision.stageTimings,
                 } as ScanLogEntry,
                 candidate: { asset, direction, decision, timeframe: tf },
               };
@@ -2159,6 +3005,7 @@ export class FlowRobotEngine {
             return {
               tf,
               entry: {
+                traceId: makeTraceId(),
                 asset,
                 score: decision.scoreBreakdown.total,
                 blocked: true as const,
@@ -2167,14 +3014,32 @@ export class FlowRobotEngine {
                 trend: decision.trend.direction ?? undefined,
                 pattern: decision.priceAction.pattern ?? undefined,
                 timeframe: tf,
+                stageTimings: decision.stageTimings,
               } as ScanLogEntry,
               candidate: null,
             };
           } catch (err) {
-            engineLogger.warn("FlowRobot", `Scan: ${asset} ${tf} erro`, { error: String(err) });
+            const errStr = String(err);
+            const errStack = err instanceof Error ? err.stack : undefined;
+            const isCalcADError = errStr.includes("calcADX") || errStr.includes("calcATR") || errStr.includes("atrBaseline");
+            const isReferenceError = err instanceof ReferenceError;
+            engineLogger.error("FlowRobot", `SCAN ${asset} ${tf}: ✗ ERRO — ${isCalcADError ? "calcADX/calcATR" : "exceção"}`, {
+              error: errStr,
+              stack: errStack?.split("\n").slice(0, 5).join(" | "),
+              asset,
+              timeframe: tf,
+              profile,
+              isImportError: isReferenceError && isCalcADError,
+              motivo: isReferenceError && isCalcADError
+                ? `ReferenceError: calcADX/calcATR/atrBaseline não importado — verifique operationProfile (${profile})`
+                : isCalcADError
+                  ? `Erro dentro de calcADX/calcATR — verifique dados OHLC`
+                  : `Exceção durante análise: ${errStr}`,
+            });
             return {
               tf,
               entry: {
+                traceId: makeTraceId(),
                 asset,
                 score: 0,
                 blocked: true as const,
@@ -2203,7 +3068,12 @@ export class FlowRobotEngine {
           );
         }
       }
+
+      scannedCount += timeframes.length;
+      this._emitMarketUpdate({ asset, catalogProgress: { scanned: scannedCount, total: totalCatalogTargets }, engineStatus: "analyzing", profile });
     }
+
+    this._emitMarketUpdate({ catalogProgress: { scanned: totalCatalogTargets, total: totalCatalogTargets }, engineStatus: "waiting", profile });
 
     this._state.scanLog = scanLog;
 
@@ -2238,11 +3108,52 @@ export class FlowRobotEngine {
     // ══ RELATÓRIO FINAL DO SCAN ══
     const blockedAssets = scanLog.filter((s) => s.blocked);
     const passedAssets = scanLog.filter((s) => !s.blocked);
-    engineLogger.info("FlowRobot", `═══ RELATÓRIO SCAN ═══`, {
+
+    // Relatório detalhado por tipo de ativo
+    const forexAssets = assets.filter((a) => /^[A-Z]{6}$/.test(a.toUpperCase()) && !["BTCUSD", "ETHUSD", "XAUUSD"].includes(a.toUpperCase()));
+    const hybridAssets = assets.filter((a) => ["BETHUSDT", "BTSOLUSDT", "MAPEUSDT", "XRDOGUSDT", "XRPSOLUSDT"].includes(a.toUpperCase()));
+
+    const forexLog = scanLog.filter((s) => /^[A-Z]{6}$/.test(s.asset.toUpperCase()) && !["BTCUSD", "ETHUSD", "XAUUSD"].includes(s.asset.toUpperCase()));
+    const forexBlocked = forexLog.filter((s) => s.blocked);
+    const forexPassed = forexLog.filter((s) => !s.blocked);
+
+    engineLogger.info("FlowRobot", `═══ RELATÓRIO SCAN COMPLETO ═══`, {
       totalAssets: assets.length,
-      passed: passedAssets.length,
-      blocked: blockedAssets.length,
-      breakdown: blockedAssets.map((s) => `${s.asset}: ${s.reason}`),
+      totalPassed: passedAssets.length,
+      totalBlocked: blockedAssets.length,
+      forexTotal: forexAssets.length,
+      forexPassed: forexPassed.length,
+      forexBlocked: forexBlocked.length,
+      hybridTotal: hybridAssets.length,
+      profile,
+      session: this._state.currentSession,
+    });
+
+    // Log detalhado para CADA ativo Forex
+    for (const fx of forexAssets) {
+      const entries = forexLog.filter((s) => s.asset === fx);
+      if (entries.length === 0) {
+        engineLogger.warn("FlowRobot", `FOREX ${fx}: ⚠ NÃO ESCANEADO — nenhum registro no scanLog`);
+      } else {
+        for (const entry of entries) {
+          if (entry.blocked) {
+            engineLogger.warn("FlowRobot", `FOREX ${fx} ${entry.timeframe}: ✗ BLOQUEADO — ${entry.reason}`);
+          } else {
+            engineLogger.info("FlowRobot", `FOREX ${fx} ${entry.timeframe}: ✓ PASSOU — score=${entry.score}, trend=${entry.trend ?? "?"}, pattern=${entry.pattern ?? "?"}`);
+          }
+        }
+      }
+    }
+
+    // Breakdown de bloqueios por motivo
+    const blockReasons = new Map<string, string[]>();
+    for (const s of blockedAssets) {
+      const reasonPrefix = s.reason.substring(0, 30);
+      if (!blockReasons.has(reasonPrefix)) blockReasons.set(reasonPrefix, []);
+      blockReasons.get(reasonPrefix)!.push(s.asset);
+    }
+    engineLogger.info("FlowRobot", `═══ MOTIVOS DE BLOQUEIO ═══`, {
+      motivos: Array.from(blockReasons.entries()).map(([motivo, items]) => `${motivo}: ${items.join(", ")}`),
     });
 
     // Emit scan log ONCE at the end of the full scan cycle
@@ -2281,15 +3192,31 @@ export class FlowRobotEngine {
   }
 
   private _isSessionAllowed(): boolean {
+    const profile = this._state.config.operationProfile ?? "AUTO";
+
+    // HYBRID_PROBABILITY operates 24/7 — skip session check entirely
+    if (profile === "HYBRID_PROBABILITY") {
+      return true;
+    }
+
     if (this._state.currentSession === "closed") {
-      engineLogger.warn("FlowRobot", "Mercado fechado — operações bloqueadas");
+      console.log(
+        `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: sessão fechada ═══ currentSession=${this._state.currentSession} asset=${this._state.config.asset}`,
+      );
+      engineLogger.warn("FlowRobot", `═══ BLOQUEADO: SESSÃO FECHADA ═══ session=${this._state.currentSession} — Nenhum ativo Forex será analisado (horário: 18:00-22:00 BRT, sábado, ou domingo antes das 22:00)`);
       this._emitDiagnostic("session", "blocked", "Mercado fechado — aguardando abertura");
       return false;
     }
+    console.log(
+      `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ Sessão OK ═══ currentSession=${this._state.currentSession}`,
+    );
     return true;
   }
 
   private async _analyzeMarketDirection(): Promise<"call" | "put" | null> {
+    console.log(
+      `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ _analyzeMarketDirection INÍCIO ═══ scanMode=${this._state.config.scanMode} asset=${this._state.config.asset} profile=${this._state.config.operationProfile} session=${this._state.currentSession}`,
+    );
     // ══ FILTRO DE SESSÃO ══
     if (!this._isSessionAllowed()) return null;
 
@@ -2301,6 +3228,7 @@ export class FlowRobotEngine {
         this._state.config.asset = result.asset;
         this._state.lastAnalysis = result.decision;
         this._state.selectedTimeframe = result.timeframe;
+        this._emit("state-changed");
         this._emitMarketUpdate({
           asset: result.asset,
           timeframe: result.timeframe,
@@ -2313,6 +3241,9 @@ export class FlowRobotEngine {
           strength: result.decision.trend?.score ?? 0,
           score: result.decision.scoreBreakdown?.total ?? 0,
           confidence: result.decision.scoreBreakdown?.total ?? 0,
+          direction: result.direction.toLowerCase() as "call" | "put",
+          engineStatus: "operating",
+          profile: this._state.config.operationProfile ?? "AUTO",
         });
 
         this._emitDiagnostic(
@@ -2320,7 +3251,13 @@ export class FlowRobotEngine {
           "authorized",
           `✅ ${result.direction.toUpperCase()} em ${result.asset} (${result.timeframe}) — Score: ${result.decision.scoreBreakdown.total}/100 (${result.decision.scoreBreakdown.bandLabel})`,
         );
-        this._emitAnalyst("analysis.completed", { direction: result.direction });
+        this._emitAnalyst("analysis.completed", {
+          asset: result.asset,
+          direction: result.direction,
+          score: result.decision.scoreBreakdown.total,
+          timeframe: result.timeframe,
+          traceId: makeTraceId(),
+        });
         this._emitAnalyst("scanner.completed");
 
         this._emitDiaryEntry(
@@ -2358,6 +3295,9 @@ export class FlowRobotEngine {
       });
       engineLogger.info("FlowRobot", "Payout consultado", { asset, payout });
       if (!payout || payout < 0.7) {
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: payout insuficiente ═══ payout=${payout} asset=${asset}`,
+        );
         this._emitDiagnostic("receiving", "error", `Payout insuficiente: ${payout ?? "null"}`);
         this._emitAnalyst("scanner.completed");
         engineLogger.warn("FlowRobot", `BLOQUEADO: payout insuficiente (${payout})`, { asset });
@@ -2366,7 +3306,9 @@ export class FlowRobotEngine {
       this._emitDiagnostic("receiving", "ok", `Payout: ${payout}`);
 
       // Busca candles para cada timeframe diretamente na resolução correta
-      const minCandles = getMinCandles(asset);
+      const profile = this.state.config.operationProfile ?? "AUTO";
+      const minCandles = getMinCandles(profile);
+      const fetchSize = getFetchSize(profile);
       let bestDecision: DecisionResult | null = null;
       let bestTimeframe: string | null = null;
       let bestDirection: "CALL" | "PUT" | null = null;
@@ -2375,15 +3317,19 @@ export class FlowRobotEngine {
 
       for (const tf of timeframes) {
         try {
-          const candles = await this.broker.getCandles(asset, tf, 200);
+          const candles = await this.broker.getCandles(asset, tf, fetchSize);
           engineLogger.info("FlowRobot", `Candles ${tf} recebidos`, {
             asset,
             count: candles.length,
+            fetchSize,
           });
           if (tf === "M1") {
-            this._emitAnalyst("candle.new", { count: candles.length });
+            this._emitAnalyst("candle.new", { symbol: asset, count: candles.length });
           }
           if (!candles || candles.length < minCandles) {
+            console.log(
+              `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: poucos candles ═══ tf=${tf} got=${candles?.length ?? 0} need=${minCandles} asset=${asset} profile=${profile}`,
+            );
             engineLogger.warn(
               "FlowRobot",
               `${tf}: poucos dados (${candles?.length ?? 0}/${minCandles})`,
@@ -2391,7 +3337,14 @@ export class FlowRobotEngine {
             );
             continue;
           }
-          const decision = this.decisionEngine.analyze(candles, asset);
+          console.log(
+            `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ Chamando DecisionEngine.analyze() ═══ tf=${tf} candles=${candles.length} asset=${asset} profile=${this.state.config.operationProfile}`,
+          );
+          const decision = this.decisionEngine.analyze(candles, asset, {
+            operationProfile: this.state.config.operationProfile,
+            hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
+            timeframe: tf,
+          });
           if (decision.direction && !decision.blockedReason) {
             const score = decision.scoreBreakdown.total;
             if (score > bestScore) {
@@ -2410,6 +3363,9 @@ export class FlowRobotEngine {
       }
 
       if (!bestDecision || !bestTimeframe || !bestDirection || !bestCandles) {
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: nenhum sinal em nenhum timeframe ═══ asset=${asset} timeframes=${timeframes.join(",")} profile=${this.state.config.operationProfile}`,
+        );
         this._emitDiagnostic("analyzing", "error", "Nenhum sinal encontrado em nenhum timeframe");
         this._emitAnalyst("scanner.completed");
         this._emitAnalyst("analysis.no-signal");
@@ -2573,7 +3529,13 @@ export class FlowRobotEngine {
         });
       }
 
-      this._emitAnalyst("analysis.completed", { direction });
+      this._emitAnalyst("analysis.completed", {
+        asset,
+        direction,
+        score: decision.scoreBreakdown.total,
+        timeframe: this._state.selectedTimeframe ?? this._state.config.timeframes[0],
+        traceId: makeTraceId(),
+      });
       this._emitAnalyst("scanner.completed");
 
       return direction;
@@ -2719,6 +3681,13 @@ export class FlowRobotEngine {
     strength?: number;
     score?: number;
     confidence?: number;
+    direction?: "call" | "put" | null;
+    analysisPhase?: "idle" | "scoring" | "trending" | "structure" | "momentum" | "done";
+    engineStatus?: "idle" | "analyzing" | "waiting" | "operating" | "error";
+    scanProgress?: number;
+    catalogProgress?: { scanned: number; total: number } | null;
+    profile?: string;
+    bufferVisual?: { current: number; capacity: number; minimum: number; percent: number } | null;
   }): void {
     try {
       analystBus.emit("market.update" as AnalystEventType, data);
@@ -2797,7 +3766,10 @@ export class FlowRobotEngine {
 
   private _emitDecisionContext(ctx: DecisionContext): void {
     try {
-      analystBus.emit("decision.context" as AnalystEventType, ctx as unknown as Record<string, unknown>);
+      analystBus.emit(
+        "decision.context" as AnalystEventType,
+        ctx as unknown as Record<string, unknown>,
+      );
     } catch (err) {
       engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar decision context", {
         error: String(err),
@@ -2807,7 +3779,10 @@ export class FlowRobotEngine {
 
   private _emitOperationContext(ctx: OperationContext): void {
     try {
-      analystBus.emit("operation.context" as AnalystEventType, ctx as unknown as Record<string, unknown>);
+      analystBus.emit(
+        "operation.context" as AnalystEventType,
+        ctx as unknown as Record<string, unknown>,
+      );
     } catch (err) {
       engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar operation context", {
         error: String(err),
@@ -2817,7 +3792,10 @@ export class FlowRobotEngine {
 
   private _emitReplayContext(ctx: ReplayContext): void {
     try {
-      analystBus.emit("replay.context" as AnalystEventType, ctx as unknown as Record<string, unknown>);
+      analystBus.emit(
+        "replay.context" as AnalystEventType,
+        ctx as unknown as Record<string, unknown>,
+      );
     } catch (err) {
       engineLogger.error("FlowRobot", "analystBus.emit falhou ao enviar replay context", {
         error: String(err),
@@ -2833,7 +3811,10 @@ export class FlowRobotEngine {
         this._replayHistory,
       );
       this._lastPerformanceContext = perfCtx;
-      analystBus.emit("performance.context" as AnalystEventType, perfCtx as unknown as Record<string, unknown>);
+      analystBus.emit(
+        "performance.context" as AnalystEventType,
+        perfCtx as unknown as Record<string, unknown>,
+      );
       // Record snapshot in history (FIFO 365 days)
       performanceHistory.record(perfCtx);
     } catch (err) {
@@ -2902,7 +3883,11 @@ export class FlowRobotEngine {
       if (!this._sessionStarted) {
         this._state.initialBankroll = newBalance;
         this._sessionStarted = true;
-        engineLogger.info("FlowRobot", `Sessão iniciada — initialBankroll=${newBalance} (saldo real Puma)`, {});
+        engineLogger.info(
+          "FlowRobot",
+          `Sessão iniciada — initialBankroll=${newBalance} (saldo real Puma)`,
+          {},
+        );
       }
 
       // Atualiza config compartilhada com saldo real
@@ -2925,9 +3910,10 @@ export class FlowRobotEngine {
     } catch (err) {
       // Falha temporária: mantém último saldo REAL conhecido, não volta para MOCK
       const failReason = err instanceof Error ? err.message : String(err);
-      const lastSync = this._lastBalanceSync > 0
-        ? new Date(this._lastBalanceSync).toLocaleTimeString("pt-BR")
-        : "never";
+      const lastSync =
+        this._lastBalanceSync > 0
+          ? new Date(this._lastBalanceSync).toLocaleTimeString("pt-BR")
+          : "never";
       console.log("[BALANCE SYNC]", {
         mode: "REAL_STALE",
         currentBankroll: this._state.currentBankroll,
@@ -2936,11 +3922,15 @@ export class FlowRobotEngine {
         reason: failReason,
         retryIn: "30s",
       });
-      engineLogger.warn("FlowRobot", "[BALANCE SYNC] Falha ao sincronizar — mantendo último saldo REAL", {
-        error: failReason,
-        currentBankroll: this._state.currentBankroll,
-        lastSync,
-      });
+      engineLogger.warn(
+        "FlowRobot",
+        "[BALANCE SYNC] Falha ao sincronizar — mantendo último saldo REAL",
+        {
+          error: failReason,
+          currentBankroll: this._state.currentBankroll,
+          lastSync,
+        },
+      );
       // NÃO altera _balanceSource — mantém "REAL" para não alternar entre modos
     }
   }
@@ -2949,7 +3939,9 @@ export class FlowRobotEngine {
     this._stopBalanceRefresh();
     this._balanceRefreshTimer = setInterval(() => {
       this._refreshBalance().catch((err) =>
-        engineLogger.error("FlowRobot", "Erro no refresh periódico de saldo", { error: String(err) }),
+        engineLogger.error("FlowRobot", "Erro no refresh periódico de saldo", {
+          error: String(err),
+        }),
       );
     }, intervalMs);
   }
@@ -3018,18 +4010,20 @@ export class FlowRobotEngine {
     const items: HealthCheckItem[] = [];
     const assets = this._state.config.assets;
     const timeframes = this._state.config.timeframes ?? ["M1"];
+    const healthProfile = this._state.config.operationProfile ?? "AUTO";
+    const healthMinCandles = getMinCandles(healthProfile);
 
     // 1. Buffer M1 (tempo real)
     const bufferStatus = this.broker.getBufferStatus();
     for (const asset of assets) {
       const buf = bufferStatus.find((b) => b.key === asset);
       const count = buf?.count ?? 0;
-      const ok = count >= getMinCandles(asset);
+      const ok = count >= healthMinCandles;
       items.push({
         label: `${asset} M1`,
         ok,
         value: `${count} candles`,
-        detail: ok ? undefined : `mínimo: ${getMinCandles(asset)}`,
+        detail: ok ? undefined : `mínimo: ${healthMinCandles}`,
       });
     }
 
@@ -3039,7 +4033,7 @@ export class FlowRobotEngine {
         if (tf === "M1") continue;
         try {
           const candles = await this.broker.getCandles(asset, tf, 200);
-          const ok = candles.length >= getMinCandles(asset);
+          const ok = candles.length >= healthMinCandles;
           items.push({
             label: `${asset} ${tf}`,
             ok,

@@ -1,4 +1,5 @@
 export interface NextTrade {
+  traceId: string;
   decisionId: number;
   symbol: string;
   direction: "call" | "put";
@@ -10,9 +11,14 @@ export interface NextTrade {
   timeframe: string;
   valid: boolean;
   decidedAt: number;
+  signalCandleTime: number;
+  signalCandleOpen: number;
+  signalCandleClose: number;
+  candleId: string;
 }
 
 export interface EntryRecord {
+  traceId: string;
   tradeId: string;
   decisionId: number;
   symbol: string;
@@ -26,6 +32,20 @@ export interface EntryRecord {
   brokerDelay: number;
   totalLatency: number;
   result: "WIN" | "LOSS" | "DRAW";
+  signalCandleTime: number;
+  signalCandleOpen: number;
+  signalCandleClose: number;
+  expectedEntryCandle: number;
+  actualEntryTime: number;
+  expectedExpiration: number;
+  actualExpiration: string;
+  candleId: string;
+  durationReceived: number;
+  durationPropagated: number;
+  durationEffective: number;
+  tsDateNow: number;
+  tsClockNow: number;
+  tsPerfNow: number;
 }
 
 export interface EntryPrecisionStats {

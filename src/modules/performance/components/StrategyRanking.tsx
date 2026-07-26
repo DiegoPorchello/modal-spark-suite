@@ -26,11 +26,11 @@ export function StrategyRanking({
             <span
               className={`size-5 rounded-full flex items-center justify-center text-[9px] font-bold ${
                 i === 0
-                  ? "bg-amber-500/20 text-amber-400"
+                  ? "bg-warning/20 text-warning"
                   : i === 1
                     ? "bg-gray-400/20 text-gray-400"
                     : i === 2
-                      ? "bg-orange-600/20 text-orange-400"
+                      ? "bg-warning/20 text-warning"
                       : "bg-secondary text-muted-foreground"
               }`}
             >
@@ -45,7 +45,7 @@ export function StrategyRanking({
             <div className="text-right">
               <div
                 className={`text-xs font-bold ${
-                  s.netProfit >= 0 ? "text-emerald-400" : "text-red-400"
+                  s.netProfit >= 0 ? "text-success" : "text-danger"
                 }`}
               >
                 {s.netProfit >= 0 ? "+" : ""}R${s.netProfit.toFixed(2)}

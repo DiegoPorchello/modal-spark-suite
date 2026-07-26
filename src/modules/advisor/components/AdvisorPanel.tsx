@@ -3,7 +3,7 @@ import {
   Target,
   AlertTriangle,
   Lightbulb,
-  Shield,
+  HeartPulse,
 } from "lucide-react";
 import type {
   AdvisorContext,
@@ -11,25 +11,31 @@ import type {
   AdvisorAlert,
   AdvisorOpportunity,
 } from "../types/advisor-context.types";
+import { PanelCard } from "../../../components/ui/PanelCard";
+import { StatusBadge, type StatusTone } from "../../../components/ui/StatusBadge";
 
-const STATUS_CONFIG: Record<
-  AdvisorContext["overallStatus"],
-  { label: string; color: string; bg: string; icon: string }
-> = {
-  EXCELLENT: { label: "EXCELENTE", color: "text-emerald-400", bg: "bg-emerald-400/10", icon: "🟢" },
-  GOOD: { label: "BOM", color: "text-green-400", bg: "bg-green-400/10", icon: "🟢" },
-  WARNING: { label: "ATENÇÃO", color: "text-amber-400", bg: "bg-amber-400/10", icon: "🟡" },
-  CRITICAL: { label: "CRÍTICO", color: "text-red-400", bg: "bg-red-400/10", icon: "🔴" },
+const STATUS_TONE: Record<AdvisorContext["overallStatus"], StatusTone> = {
+  EXCELLENT: "success",
+  GOOD: "success",
+  WARNING: "warning",
+  CRITICAL: "danger",
+};
+
+const STATUS_LABEL: Record<AdvisorContext["overallStatus"], string> = {
+  EXCELLENT: "EXCELENTE",
+  GOOD: "BOM",
+  WARNING: "ATENÇÃO",
+  CRITICAL: "CRÍTICO",
 };
 
 const PRIORITY_CONFIG: Record<string, { color: string; bg: string }> = {
-  CRITICAL: { color: "text-red-400", bg: "bg-red-400/10" },
-  HIGH: { color: "text-orange-400", bg: "bg-orange-400/10" },
-  MEDIUM: { color: "text-amber-400", bg: "bg-amber-400/10" },
-  LOW: { color: "text-blue-400", bg: "bg-blue-400/10" },
-  INFO: { color: "text-blue-400", bg: "bg-blue-400/10" },
-  WARNING: { color: "text-amber-400", bg: "bg-amber-400/10" },
-  DANGER: { color: "text-red-400", bg: "bg-red-400/10" },
+  CRITICAL: { color: "text-danger", bg: "bg-danger/10" },
+  HIGH: { color: "text-warning", bg: "bg-warning/10" },
+  MEDIUM: { color: "text-warning", bg: "bg-warning/10" },
+  LOW: { color: "text-info", bg: "bg-info/10" },
+  INFO: { color: "text-info", bg: "bg-info/10" },
+  WARNING: { color: "text-warning", bg: "bg-warning/10" },
+  DANGER: { color: "text-danger", bg: "bg-danger/10" },
 };
 
 export function AdvisorPanel({ context }: { context: AdvisorContext | null }) {
@@ -40,20 +46,22 @@ export function AdvisorPanel({ context }: { context: AdvisorContext | null }) {
       context.opportunities.length > 0);
 
   return (
-    <section className="grid grid-cols-12 gap-4">
-      <div className="col-span-12 panel p-4">
-        <div className="flex items-center gap-2 mb-4">
-          <Brain className="size-4 text-primary" />
-          <span className="text-[10px] tracking-widest text-muted-foreground font-semibold">
-            ADVISOR INTELLIGENCE
-          </span>
-          {context && (
-            <span className={`ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full ${STATUS_CONFIG[context.overallStatus].bg} ${STATUS_CONFIG[context.overallStatus].color}`}>
-              {STATUS_CONFIG[context.overallStatus].icon} {STATUS_CONFIG[context.overallStatus].label}
-            </span>
-          )}
-        </div>
-
+    <div className="col-span-12">
+      <PanelCard
+        icon={Brain}
+        title="Inteligência do Advisor"
+        description="Recomendações, alertas e saúde do robô."
+        status={
+          context ? (
+            <StatusBadge
+              tone={STATUS_TONE[context.overallStatus]}
+              label={STATUS_LABEL[context.overallStatus]}
+            />
+          ) : (
+            <StatusBadge tone="neutral" label="SEM DADOS" />
+          )
+        }
+      >
         {!hasData ? (
           <EmptyState />
         ) : (
@@ -75,8 +83,8 @@ export function AdvisorPanel({ context }: { context: AdvisorContext | null }) {
             <RobotHealthMini context={context} />
           </div>
         )}
-      </div>
-    </section>
+      </PanelCard>
+    </div>
   );
 }
 
@@ -91,9 +99,9 @@ function EmptyState() {
 
 function StatusSummary({ context }: { context: AdvisorContext }) {
   const items = [
-    { label: "Recomendações", value: context.recommendations.length, icon: Target, color: "text-blue-400" },
-    { label: "Alertas", value: context.alerts.length, icon: AlertTriangle, color: "text-amber-400" },
-    { label: "Oportunidades", value: context.opportunities.length, icon: Lightbulb, color: "text-emerald-400" },
+    { label: "Recomendações", value: context.recommendations.length, icon: Target, color: "text-info" },
+    { label: "Alertas", value: context.alerts.length, icon: AlertTriangle, color: "text-warning" },
+    { label: "Oportunidades", value: context.opportunities.length, icon: Lightbulb, color: "text-success" },
   ];
 
   return (
@@ -115,10 +123,10 @@ function TopRecommendation({ rec }: { rec: AdvisorRecommendation }) {
   const cfg = PRIORITY_CONFIG[rec.priority] || PRIORITY_CONFIG.MEDIUM;
 
   return (
-    <div className="col-span-4 p-3 rounded-lg bg-blue-500/5 border border-blue-500/10">
+    <div className="col-span-4 p-3 rounded-lg bg-info/5 border border-info/10">
       <div className="flex items-center gap-2 mb-2">
-        <Target className="size-3.5 text-blue-400" />
-        <span className="text-[10px] tracking-widest text-blue-400 font-semibold">PRIORIZE</span>
+        <Target className="size-3.5 text-info" />
+        <span className="text-[10px] tracking-widest text-info font-semibold">PRIORIZE</span>
         <span className={`ml-auto text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${cfg.bg} ${cfg.color}`}>
           {rec.priority}
         </span>
@@ -133,10 +141,10 @@ function TopAlert({ alert }: { alert: AdvisorAlert }) {
   const cfg = PRIORITY_CONFIG[alert.severity] || PRIORITY_CONFIG.WARNING;
 
   return (
-    <div className="col-span-4 p-3 rounded-lg bg-amber-500/5 border border-amber-500/10">
+    <div className="col-span-4 p-3 rounded-lg bg-warning/5 border border-warning/10">
       <div className="flex items-center gap-2 mb-2">
-        <AlertTriangle className="size-3.5 text-amber-400" />
-        <span className="text-[10px] tracking-widest text-amber-400 font-semibold">⚠ EVITE</span>
+        <AlertTriangle className="size-3.5 text-warning" />
+        <span className="text-[10px] tracking-widest text-warning font-semibold">⚠ EVITE</span>
         <span className={`ml-auto text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${cfg.bg} ${cfg.color}`}>
           {alert.severity}
         </span>
@@ -149,10 +157,10 @@ function TopAlert({ alert }: { alert: AdvisorAlert }) {
 
 function TopOpportunity({ opp }: { opp: AdvisorOpportunity }) {
   return (
-    <div className="col-span-4 p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/10">
+    <div className="col-span-4 p-3 rounded-lg bg-success/5 border border-success/10">
       <div className="flex items-center gap-2 mb-2">
-        <Lightbulb className="size-3.5 text-emerald-400" />
-        <span className="text-[10px] tracking-widest text-emerald-400 font-semibold">💡 OPORTUNIDADE</span>
+        <Lightbulb className="size-3.5 text-success" />
+        <span className="text-[10px] tracking-widest text-success font-semibold">💡 OPORTUNIDADE</span>
       </div>
       <div className="text-sm font-semibold text-foreground mb-1">{opp.title}</div>
       <div className="text-[11px] text-muted-foreground">{opp.description}</div>
@@ -165,14 +173,14 @@ function RobotHealthMini({ context }: { context: AdvisorContext }) {
 
   const ringColor =
     h.score >= 80
-      ? "stroke-emerald-400"
+      ? "stroke-success"
       : h.score >= 60
-        ? "stroke-green-400"
+        ? "stroke-success"
         : h.score >= 40
-          ? "stroke-amber-400"
+          ? "stroke-warning"
           : h.score >= 20
-            ? "stroke-orange-400"
-            : "stroke-red-400";
+            ? "stroke-warning"
+            : "stroke-danger";
 
   const radius = 28;
   const circumference = 2 * Math.PI * radius;
@@ -187,17 +195,18 @@ function RobotHealthMini({ context }: { context: AdvisorContext }) {
   ];
 
   return (
-    <div className="col-span-12 p-3 rounded-lg bg-muted/30">
-      <div className="flex items-center gap-2 mb-3">
-        <Shield className="size-3.5 text-primary" />
-        <span className="text-[10px] tracking-widest text-muted-foreground font-semibold">
-          SAÚDE DO ROBÔ
-        </span>
-        <span className={`ml-auto text-[10px] font-semibold ${h.score >= 60 ? "text-emerald-400" : h.score >= 40 ? "text-amber-400" : "text-red-400"}`}>
-          {h.score}/100 — {h.label}
-        </span>
-      </div>
-
+    <PanelCard
+      icon={HeartPulse}
+      title="Saúde do Robô"
+      description="Pontuação de saúde e estabilidade."
+      status={
+        <StatusBadge
+          tone={h.score >= 60 ? "success" : h.score >= 40 ? "warning" : "danger"}
+          label={h.label}
+        />
+      }
+      className="col-span-12"
+    >
       <div className="flex items-center gap-6">
         <div className="relative shrink-0">
           <svg width="70" height="70" viewBox="0 0 70 70">
@@ -239,6 +248,6 @@ function RobotHealthMini({ context }: { context: AdvisorContext }) {
           ))}
         </div>
       </div>
-    </div>
+    </PanelCard>
   );
 }

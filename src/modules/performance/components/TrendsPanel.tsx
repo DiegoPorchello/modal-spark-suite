@@ -1,8 +1,8 @@
 import type { PerformanceTrend } from "../types/performance-context.types";
 
 function TrendArrow({ direction }: { direction: "up" | "down" | "stable" }) {
-  if (direction === "up") return <span className="text-emerald-400">↑</span>;
-  if (direction === "down") return <span className="text-red-400">↓</span>;
+  if (direction === "up") return <span className="text-success">↑</span>;
+  if (direction === "down") return <span className="text-danger">↓</span>;
   return <span className="text-muted-foreground">→</span>;
 }
 
@@ -33,9 +33,9 @@ function TrendCompare({
       <span
         className={`text-[9px] font-bold ${
           direction === "up"
-            ? "text-emerald-400"
+            ? "text-success"
             : direction === "down"
-              ? "text-red-400"
+              ? "text-danger"
               : "text-muted-foreground"
         }`}
       >

@@ -1,9 +1,9 @@
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjMxNjU0IiwiZW1haWwiOiJmZXJuYW5kYWxvcGVzdG9ycmVzMUBnbWFpbC5jb20iLCJqdGkiOiJjOGE0YjNjMy1hZTUwLTRlMjQtYmJjNC0zZGIyODVjOGE1NTciLCJ0eXAiOiJhY2Nlc3MiLCJhdWQiOiJ0cmFkZSIsImZpZCI6Ijg0MzEzOWExLTA1ZjYtNDY3OS05MjMwLWUwYTE1NzA3OTQyZiIsImlhdCI6MTc4NDQ3MzkzMCwiZXhwIjoxNzg0NDc0ODMwfQ.B0bowJ6FIB6v7Q8A0ZNzp89axVbLZ7IOBrGcCwE15BA",
-  "refresh_token": "RcEbwNAssDk32mxcPWsZsnm9eeKz7Da30r7Se_DbuGM",
-  "user_id": "31654",
-  "email": "fernandalopestorres1@gmail.com",
-  "expires_at": 1784474830,
-  "issued_at": 1784473930,
-  "updated_at": "2026-07-19T15:12:09.624342+00:00"
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjI0NTA2IiwiZW1haWwiOiJhbGVrb25uZW1AZ21haWwuY29tIiwianRpIjoiZjA1NjFlNzQtNGYyMy00NWZiLTgxYjYtNGFjZTQ2MDI4MmZiIiwidHlwIjoiYWNjZXNzIiwiYXVkIjoidHJhZGUiLCJmaWQiOiIzYTQzMmMxOS0yMGEyLTQ0YTMtYmU5Zi05ODM0YzBmMDU3NGIiLCJpYXQiOjE3ODUwOTYxODMsImV4cCI6MTc4NTA5NzA4M30.rPqXQOzzPftdAdig0jRb1gYMjs5FQVBqlyc_MmVJHsA",
+  "refresh_token": "ZKpSTBq2DmvfFEqDR5KfMpuC2aQn4wJhIJjKV1PtiM4",
+  "user_id": "24506",
+  "email": "alekonnem@gmail.com",
+  "expires_at": 1785097083,
+  "issued_at": 1785096183,
+  "updated_at": "2026-07-26T20:03:04.553484+00:00"
 }

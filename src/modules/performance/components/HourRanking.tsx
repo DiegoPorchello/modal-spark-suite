@@ -26,7 +26,7 @@ export function HourRanking({ hours }: { hours: HourPerformance[] }) {
               <div className="w-full h-1.5 rounded-full bg-secondary overflow-hidden">
                 <div
                   className={`h-full rounded-full ${
-                    h.netProfit >= 0 ? "bg-emerald-500" : "bg-red-500"
+                    h.netProfit >= 0 ? "bg-success" : "bg-danger"
                   }`}
                   style={{
                     width: `${Math.min(100, Math.abs(h.winRate))}%`,
@@ -37,7 +37,7 @@ export function HourRanking({ hours }: { hours: HourPerformance[] }) {
             <div className="text-right">
               <div
                 className={`text-xs font-bold ${
-                  h.netProfit >= 0 ? "text-emerald-400" : "text-red-400"
+                  h.netProfit >= 0 ? "text-success" : "text-danger"
                 }`}
               >
                 {h.netProfit >= 0 ? "+" : ""}R${h.netProfit.toFixed(2)}

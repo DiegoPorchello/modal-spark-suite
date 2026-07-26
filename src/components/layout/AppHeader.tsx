@@ -224,7 +224,7 @@ export function AppHeader({
                   {n.type === "warning" && (
                     <AlertTriangle className="size-4 text-warning mt-0.5 shrink-0" />
                   )}
-                  {n.type === "info" && <Clock className="size-4 text-blue-400 mt-0.5 shrink-0" />}
+                  {n.type === "info" && <Clock className="size-4 text-info mt-0.5 shrink-0" />}
                   <div className="flex-1 min-w-0">
                     <div className="truncate">{n.message}</div>
                     <div

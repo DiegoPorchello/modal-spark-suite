@@ -6,27 +6,27 @@ const SEVERITY_CONFIG: Record<
 > = {
   SUCCESS: {
     icon: "✓",
-    color: "text-emerald-400",
-    bgColor: "bg-emerald-500/10",
-    borderColor: "border-emerald-500/20",
+    color: "text-success",
+    bgColor: "bg-success/10",
+    borderColor: "border-success/20",
   },
   INFO: {
     icon: "ℹ",
-    color: "text-blue-400",
-    bgColor: "bg-blue-500/10",
-    borderColor: "border-blue-500/20",
+    color: "text-info",
+    bgColor: "bg-info/10",
+    borderColor: "border-info/20",
   },
   WARNING: {
     icon: "⚠",
-    color: "text-amber-400",
-    bgColor: "bg-amber-500/10",
-    borderColor: "border-amber-500/20",
+    color: "text-warning",
+    bgColor: "bg-warning/10",
+    borderColor: "border-warning/20",
   },
   DANGER: {
     icon: "✕",
-    color: "text-red-400",
-    bgColor: "bg-red-500/10",
-    borderColor: "border-red-500/20",
+    color: "text-danger",
+    bgColor: "bg-danger/10",
+    borderColor: "border-danger/20",
   },
 };
 

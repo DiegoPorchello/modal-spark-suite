@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo, type ComponentType } from "react";
 import { useBroker } from "../hooks/useBroker";
 import { useRobot } from "../hooks/useRobot";
 import { useAnalystStore } from "../modules/analyst/AnalystStore";
@@ -10,10 +10,28 @@ import { MarketContextCard } from "../modules/flow-continuity/components/MarketC
 import { ReplayCard } from "../modules/flow-continuity/components/ReplayCard";
 import { ReplayDrawer } from "../modules/flow-continuity/components/ReplayDrawer";
 import { strategyManager } from "../services/strategy-manager";
+import { AssetsAdvancedConfigPanel } from "../components/AssetsAdvancedConfigPanel";
 import { PerformanceIntelligencePanel } from "../modules/performance/components/PerformanceIntelligencePanel";
-import { IntelligenceSection } from "../modules/advisor/components/IntelligenceSection";
+import {
+  IntelligenceSection,
+  ADVISOR_TONE,
+} from "../modules/advisor/components/IntelligenceSection";
 import { buildAdvisorContext } from "../modules/advisor/services";
 import { advisorHistory } from "../modules/advisor/services/advisor-history";
+import { MarketProfileCard } from "../modules/market/components";
+import { OperationalProfileSelector } from "../components/operational-profile-selector/OperationalProfileSelector";
+import { HybridProbabilityPanel } from "../components/hybrid-probability/HybridProbabilityPanel";
+import { ExperimentsPanel } from "../components/experiments/ExperimentsPanel";
+import { LiveIntelligencePanel } from "../modules/live-intelligence/LiveIntelligencePanel";
+import { loadCore } from "../modules/market/cores";
+import { StrategyLifecycleCard } from "../modules/lifecycle/components/StrategyLifecycleCard";
+import { StrategyTimeline } from "../modules/lifecycle/components/StrategyTimeline";
+import { getGlobalLifecycleEngine } from "../modules/lifecycle";
+import type { StrategyLifecycleInstance } from "../modules/lifecycle/types/strategy-lifecycle.types";
+import { LearningInsightsCard } from "../modules/learning/components/LearningInsightsCard";
+import { getGlobalLearningEngine } from "../modules/learning";
+import { getGlobalMemoryEngine } from "../modules/market-memory";
+import type { LearningContext } from "../modules/learning/types/learning-types";
 import {
   LayoutDashboard,
   TrendingUp,
@@ -33,6 +51,7 @@ import {
   User,
   Check,
   Circle,
+  Coins,
   AlertTriangle,
   Eye,
   EyeOff,
@@ -42,8 +61,10 @@ import {
   Moon,
   Sun,
   Palette,
+  Power,
   Volume2,
   VolumeX,
+  Wallet,
   Clock,
   Save,
   Loader2,
@@ -55,14 +76,25 @@ import {
   ArrowUp,
   ArrowDown,
   Brain,
+  HeartPulse,
+  Copy,
 } from "lucide-react";
 import { CriticalErrorModal } from "../components/ui/CriticalErrorModal";
+import { CopyTradeModal } from "../components/copy-trader/CopyTradeModal";
+import { MetricCard } from "../components/ui/MetricCard";
+import { ModuleStatus } from "../components/ui/ModuleStatus";
+import { TabNav, type TabDef } from "../components/ui/TabNav";
+import { PanelCard } from "../components/ui/PanelCard";
+import { StatusBadge } from "../components/ui/StatusBadge";
 import type {
   RobotEvent,
   RobotOperation,
   RobotStatus,
   RobotConfig,
+  RobotState,
 } from "../engine/flow-robot-engine";
+import type { MarketProfile } from "../modules/market/types/market-profile.types";
+import { getBestEntryPerAsset } from "../ranking";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -82,10 +114,12 @@ type NavKey =
   | "padroes"
   | "ativos"
   | "historico"
+  | "copytrade"
   | "calc"
   | "backtest"
   | "puma"
   | "config"
+  | "experiments"
   | "ajuda";
 
 type NavIcon = React.ComponentType<{ className?: string }>;
@@ -105,12 +139,16 @@ const NAV: { section: string; items: { key: NavKey; label: string; icon: NavIcon
   },
   { section: "CATÁLOGO", items: [{ key: "padroes", label: "Padrões", icon: BookOpen }] },
   { section: "RANKING", items: [{ key: "ativos", label: "Ativos", icon: Trophy }] },
-  { section: "OPERAÇÕES", items: [{ key: "historico", label: "Histórico", icon: History }] },
+  { section: "OPERAÇÕES", items: [{ key: "historico", label: "Histórico", icon: History }, { key: "copytrade", label: "Copy Trade", icon: Copy }] },
   {
     section: "GERENCIAMENTO",
     items: [{ key: "calc", label: "Calculadora Sorosgale", icon: Calculator }],
   },
   { section: "BACKTEST", items: [{ key: "backtest", label: "Simulador", icon: FlaskConical }] },
+  {
+    section: "EXPERIMENTOS",
+    items: [{ key: "experiments", label: "Experimentos", icon: FlaskConical }],
+  },
   { section: "INTEGRAÇÕES", items: [{ key: "puma", label: "Puma Broker", icon: Plug }] },
   { section: "CONFIGURAÇÕES", items: [{ key: "config", label: "Configurações", icon: Settings }] },
   { section: "AJUDA", items: [{ key: "ajuda", label: "Suporte", icon: HelpCircle }] },
@@ -157,7 +195,11 @@ function Dashboard() {
   const [modalOpen, setModalOpen] = useState<boolean>(false);
   const [currentPayout, setCurrentPayout] = useState<number>(0);
   const [replayDrawerOpen, setReplayDrawerOpen] = useState(false);
-  const [selectedReplay, setSelectedReplay] = useState<import("../modules/flow-continuity/types/replay-context.types").ReplayContext | null>(null);
+  const [selectedReplay, setSelectedReplay] = useState<
+    import("../modules/flow-continuity/types/replay-context.types").ReplayContext | null
+  >(null);
+  const [copyTradeOpen, setCopyTradeOpen] = useState(false);
+  const [assetConfigModalOpen, setAssetConfigModalOpen] = useState(false);
   const {
     connected,
     userName,
@@ -177,6 +219,61 @@ function Dashboard() {
     [store.performanceContext],
   );
 
+  // ── Build MarketProfile from config ──
+  const marketProfile = useMemo(() => {
+    const mode = robotState.config.marketMode ?? "AUTO";
+    const asset = robotState.config.asset;
+    const result = loadCore(mode, asset);
+    const ts = new Date().toLocaleTimeString("pt-BR");
+    console.log(`[Dashboard] ${ts} 📦 useMemo marketProfile — mode: ${mode}, asset: ${asset}`);
+    console.log(`[Dashboard] ${ts} 📦 loadCore returned:`, {
+      detectedMarket: result.profile.detectedMarket,
+      activeCore: result.profile.activeCore,
+      activeProfileName: result.profile.activeProfileName,
+      activeStrategyName: result.profile.activeStrategyName,
+      confidence: result.profile.confidence,
+    });
+    return result.profile;
+  }, [robotState.config.marketMode, robotState.config.asset]);
+
+  // ── Strategy Lifecycle state ──
+  const lifecycleEngine = useMemo(() => getGlobalLifecycleEngine(), []);
+  const [activeLifecycle, setActiveLifecycle] = useState<StrategyLifecycleInstance | null>(null);
+  const [lifecycleUpdate, setLifecycleUpdate] = useState(0);
+
+  // Subscribe to lifecycle events
+  useEffect(() => {
+    const unsub = lifecycleEngine.getEventBus().subscribe((event) => {
+      if (event.type === "strategy.state.changed") {
+        const all = lifecycleEngine.getActive();
+        setActiveLifecycle(all.length > 0 ? all[all.length - 1] : null);
+        setLifecycleUpdate((c) => c + 1);
+      }
+      if (event.type === "strategy.timeline.updated") {
+        const all = lifecycleEngine.getActive();
+        setActiveLifecycle(all.length > 0 ? all[all.length - 1] : null);
+      }
+    });
+    return unsub;
+  }, [lifecycleEngine]);
+
+  // ── Learning Engine state ──
+  const learningEngine = useMemo(() => getGlobalLearningEngine(), []);
+  const memoryEngine = useMemo(() => getGlobalMemoryEngine(), []);
+  const [learningContext, setLearningContext] = useState<LearningContext | null>(null);
+
+  // Run learning analysis when memory records change
+  useEffect(() => {
+    const unsub = memoryEngine.subscribe(() => {
+      const records = memoryEngine.getAll();
+      if (records.length > 0) {
+        const ctx = learningEngine.buildContext(records);
+        setLearningContext(ctx);
+      }
+    });
+    return unsub;
+  }, [memoryEngine, learningEngine]);
+
   // ── Record advisor context to history and emit event ──
   useEffect(() => {
     if (advisorContext) {
@@ -185,10 +282,30 @@ function Dashboard() {
     }
   }, [advisorContext]);
 
-  const handleOpenReplay = useCallback((ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext) => {
-    setSelectedReplay(ctx);
-    setReplayDrawerOpen(true);
-  }, []);
+  // ── Emit market profile changes ──
+  useEffect(() => {
+    if (marketProfile) {
+      const ts = new Date().toLocaleTimeString("pt-BR");
+      console.log(`[Dashboard] ${ts} 📡 Emitindo market.profile.changed:`, {
+        detectedMarket: marketProfile.detectedMarket,
+        activeCore: marketProfile.activeCore,
+        activeProfileName: marketProfile.activeProfileName,
+        mode: marketProfile.mode,
+      });
+      analystBus.emit(
+        "market.profile.changed",
+        marketProfile as unknown as Record<string, unknown>,
+      );
+    }
+  }, [marketProfile]);
+
+  const handleOpenReplay = useCallback(
+    (ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext) => {
+      setSelectedReplay(ctx);
+      setReplayDrawerOpen(true);
+    },
+    [],
+  );
 
   useEffect(() => {
     return () => console.log("[UNMOUNT] Dashboard");
@@ -199,34 +316,60 @@ function Dashboard() {
     const unsub = analystBus.subscribe((type, meta) => {
       switch (type) {
         case "decision.context":
-          store.setDecisionContext(meta as unknown as import("../modules/flow-continuity/types/decision-context.types").DecisionContext);
+          store.setDecisionContext(
+            meta as unknown as import("../modules/flow-continuity/types/decision-context.types").DecisionContext,
+          );
           break;
         case "operation.context":
-          store.setOperationContext(meta as unknown as import("../modules/flow-continuity/types/operation-context.types").OperationContext);
+          store.setOperationContext(
+            meta as unknown as import("../modules/flow-continuity/types/operation-context.types").OperationContext,
+          );
           break;
         case "replay.context":
-          store.setReplayContext(meta as unknown as import("../modules/flow-continuity/types/replay-context.types").ReplayContext);
+          store.setReplayContext(
+            meta as unknown as import("../modules/flow-continuity/types/replay-context.types").ReplayContext,
+          );
           break;
         case "performance.context":
-          store.setPerformanceContext(meta as unknown as import("../modules/performance/types/performance-context.types").PerformanceContext);
+          store.setPerformanceContext(
+            meta as unknown as import("../modules/performance/types/performance-context.types").PerformanceContext,
+          );
           break;
         case "advisor.context":
-          store.setAdvisorContext(meta as unknown as import("../modules/advisor/types/advisor-context.types").AdvisorContext);
+          store.setAdvisorContext(
+            meta as unknown as import("../modules/advisor/types/advisor-context.types").AdvisorContext,
+          );
           break;
         case "score.breakdown":
-          store.setScoreBreakdown(meta as unknown as import("../modules/analyst/AnalystTypes").ScoreBreakdownDisplay);
+          store.setScoreBreakdown(
+            meta as unknown as import("../modules/analyst/AnalystTypes").ScoreBreakdownDisplay,
+          );
           break;
         case "system.info": {
           const m = meta as Record<string, unknown>;
-          if (m.aiState) store.setStatus(m.aiState as import("../modules/analyst/AnalystTypes").AnalystAIState);
-          if (m.reasoning) store.setReasoning(m.reasoning as import("../modules/analyst/AnalystTypes").AnalystReasoningItem[]);
+          if (m.aiState)
+            store.setStatus(m.aiState as import("../modules/analyst/AnalystTypes").AnalystAIState);
+          if (m.reasoning)
+            store.setReasoning(
+              m.reasoning as import("../modules/analyst/AnalystTypes").AnalystReasoningItem[],
+            );
           if (m.confidence !== undefined) store.setConfidence(Number(m.confidence));
           if (m.score !== undefined) store.setScore(Number(m.score));
-          if (m.nextAction) store.setNextAction(m.nextAction as import("../modules/analyst/AnalystTypes").AnalystNextAction);
-          if (m.stats) store.updateStats(m.stats as Partial<import("../modules/analyst/AnalystTypes").AnalystStats>);
+          if (m.nextAction)
+            store.setNextAction(
+              m.nextAction as import("../modules/analyst/AnalystTypes").AnalystNextAction,
+            );
+          if (m.stats)
+            store.updateStats(
+              m.stats as Partial<import("../modules/analyst/AnalystTypes").AnalystStats>,
+            );
           if (m.diagnostic) {
             const d = m.diagnostic as { step: string; status: string; message: string };
-            store.updateDiagnostic(d.step as import("../modules/analyst/AnalystTypes").DiagnosticStep, d.status as import("../modules/analyst/AnalystTypes").DiagnosticStatus, d.message);
+            store.updateDiagnostic(
+              d.step as import("../modules/analyst/AnalystTypes").DiagnosticStep,
+              d.status as import("../modules/analyst/AnalystTypes").DiagnosticStatus,
+              d.message,
+            );
           }
           break;
         }
@@ -235,14 +378,42 @@ function Dashboard() {
           store.updateMarket(m as Partial<import("../modules/analyst/AnalystTypes").MarketInfo>);
           break;
         }
+        case "buffer.asset.update": {
+          const m = meta as Record<string, unknown>;
+          const asset = m.asset as string;
+          if (asset) {
+            store.setBufferAssets((prev) => ({
+              ...prev,
+              [asset]: {
+                asset,
+                current: m.current as number,
+                capacity: m.capacity as number,
+                minimum: m.minimum as number,
+                percent: m.percent as number,
+                lastCandleTime: m.lastCandleTime as number,
+                secondsWithoutCandles: m.secondsWithoutCandles as number,
+                isReceiving: m.isReceiving as boolean,
+                bufferHealth: m.bufferHealth as "live" | "waiting" | "stale",
+                bufferStatus: m.bufferStatus as string,
+              },
+            }));
+          }
+          break;
+        }
         case "candle.reading": {
           const m = meta as Record<string, unknown>;
-          store.updateCandleReading(m as Partial<import("../modules/analyst/AnalystTypes").CandleReading>);
+          store.updateCandleReading(
+            m as Partial<import("../modules/analyst/AnalystTypes").CandleReading>,
+          );
           break;
         }
         case "diary.entry": {
           const m = meta as Record<string, unknown>;
-          store.addDiaryEntry(String(m.text || ""), String(m.icon || "📝"), (m.level as import("../modules/analyst/AnalystTypes").AnalystMessageLevel) || "info");
+          store.addDiaryEntry(
+            String(m.text || ""),
+            String(m.icon || "📝"),
+            (m.level as import("../modules/analyst/AnalystTypes").AnalystMessageLevel) || "info",
+          );
           break;
         }
         case "scanLog.update": {
@@ -522,6 +693,8 @@ function Dashboard() {
           clearCriticalAuthError();
         }}
       />
+      {/* Copy Trade Modal */}
+      <CopyTradeModal open={copyTradeOpen} onClose={() => setCopyTradeOpen(false)} />
       {/* Sidebar */}
       <aside className="w-64 shrink-0 bg-sidebar border-r border-border flex flex-col">
         <div className="px-5 py-5 border-b border-border flex items-center gap-3">
@@ -535,6 +708,9 @@ function Dashboard() {
             </div>
           </div>
         </div>
+        <div className="px-3 py-3 border-b border-border">
+          <BrokerCard />
+        </div>
         <nav className="flex-1 overflow-y-auto py-3">
           {NAV.map((g) => (
             <div key={g.section} className="px-3 mb-3">
@@ -545,24 +721,34 @@ function Dashboard() {
               {g.items.map((it) => {
                 const Icon = it.icon;
                 const isActive = active === it.key;
-                return (
-                  <button
-                    key={it.key}
-                    onClick={() => setActive(it.key)}
-                    className={`w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-3 transition-colors ${
-                      isActive
-                        ? "bg-success/10 text-success border border-success/30"
-                        : "text-sidebar-foreground hover:bg-accent/40"
-                    }`}
-                  >
-                    <Icon className="size-4" />
-                    {it.label}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </nav>
+                const isCopyTrade = it.key === "copytrade";
+      return (
+          <button
+            key={it.key}
+            onClick={() => {
+              if (isCopyTrade) {
+                setCopyTradeOpen(true);
+              } else if (it.key === "config-ativos") {
+                setAssetConfigModalOpen(true);
+              } else {
+                setActive(it.key);
+              }
+            }}
+            className={`w-full text-left px-3 py-2 rounded-md text-sm flex items-center gap-3 transition-colors ${
+              isActive
+                ? "bg-success/10 text-success border border-success/30"
+                : "text-sidebar-foreground hover:bg-accent/40"
+            }`}
+          >
+            <Icon className="size-4" />
+            {it.label}
+          </button>
+        );
+      })}
+    </div>
+  ))}
+</nav>
+
         <div className="px-5 py-3 border-t border-border text-[11px] text-muted-foreground">
           Nexor AI v1.0.0
         </div>
@@ -739,7 +925,7 @@ function Dashboard() {
                             <AlertTriangle className="size-4 text-warning mt-0.5 shrink-0" />
                           )}
                           {n.type === "info" && (
-                            <Clock className="size-4 text-blue-400 mt-0.5 shrink-0" />
+                            <Clock className="size-4 text-info mt-0.5 shrink-0" />
                           )}
                           <div className="flex-1 min-w-0">
                             <div className="truncate">{n.message}</div>
@@ -932,30 +1118,29 @@ function Dashboard() {
         {/* Content */}
         <main className="flex-1 overflow-auto p-5 space-y-5">
           {/* Top metrics row */}
-          <section className="flex gap-4 flex-wrap">
-            <Metric
+          <section className="flex gap-6 flex-wrap">
+            <MetricCard
               label="ACTIVE ASSET"
               value={getAssetDisplayName(
-                robotState.lastScannedAsset || robotState.config.asset || "EURUSD",
+                store.market.asset || robotState.lastScannedAsset || "EURUSD",
               )}
               flag={getAssetFlag(
-                robotState.lastScannedAsset || robotState.config.asset || "EURUSD",
+                store.market.asset || robotState.lastScannedAsset || "EURUSD",
               )}
-              sub=""
             />
-            <Metric
+            <MetricCard
               label="TIMEFRAME"
               value={robotState.selectedTimeframe || robotState.config.timeframes?.[0] || "M1"}
               sub={`Expiration ${robotState.config.expirationSeconds >= 60 ? Math.round(robotState.config.expirationSeconds / 60) + " min" : robotState.config.expirationSeconds + "s"}`}
             />
             <ActiveStrategyCard />
             <MarketContextCard />
-            <Metric
+            <MetricCard
               label="CURRENT PAYOUT"
               value={currentPayout > 0 ? `${currentPayout}%` : "—"}
-              accent={currentPayout >= 80}
+              accent={currentPayout >= 80 ? "success" : "neutral"}
             />
-            <Metric
+            <MetricCard
               label="SESSION PROFIT"
               value={`${robotState.sessionProfit >= 0 ? "+" : ""}${robotState.sessionProfit.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}`}
               sub={
@@ -963,15 +1148,15 @@ function Dashboard() {
                   ? `${robotState.sessionProfit >= 0 ? "+" : ""}${((robotState.sessionProfit / robotState.initialBankroll) * 100).toFixed(2)}%`
                   : "0%"
               }
-              accent
+              accent="success"
             />
-            <Metric
+            <MetricCard
               label="WINS / LOSS"
               value={`${robotState.totalWins} / ${robotState.totalLosses}`}
               sub={`${robotState.winRate.toFixed(0)}%`}
-              accent
+              accent="success"
             />
-            <Metric
+            <MetricCard
               label="ROBOT STATUS"
               value={
                 robotState.status === "running"
@@ -993,62 +1178,212 @@ function Dashboard() {
                       ? "Manual"
                       : "Inactive"
               }
-              status={robotState.status === "running" || robotState.status === "waiting-result"}
+              accent={
+                robotState.status === "running" || robotState.status === "waiting-result"
+                  ? "success"
+                  : "neutral"
+              }
+              live={robotState.status === "running" || robotState.status === "waiting-result"}
             />
           </section>
           {/* Robot Controls */}
-          <section className="p-4 panel flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <span className="text-xs font-semibold tracking-wider text-muted-foreground">
-                ROBOT CONTROLS
-              </span>
-              <RobotControls />
+          <PanelCard
+            icon={Power}
+            title="Controles do Robô"
+            description="Inicie, pause ou reset da operação."
+            status={
+              robotState.status === "running" ? (
+                <StatusBadge tone="success" label="OPERANDO" />
+              ) : robotState.status === "waiting-result" ? (
+                <StatusBadge tone="success" label="AGUARDANDO" />
+              ) : robotState.status === "paused" ? (
+                <StatusBadge tone="warning" label="PAUSADO" />
+              ) : (
+                <StatusBadge tone="neutral" label="PARADO" />
+              )
+            }
+          >
+            <RobotControls />
+          </PanelCard>
+
+          {/* ═══ NEXOR CONTROL CENTER ═══ */}
+          <NexorControlCenter
+            robotState={robotState}
+            marketProfile={marketProfile}
+            learningContext={learningContext}
+            chartTab={chartTab}
+            setChartTab={setChartTab}
+            handleOpenReplay={handleOpenReplay}
+            connected={connected}
+          />
+
+          {/* ═══ NEXOR AI V2 — LIVE INTELLIGENCE ═══ */}
+          <LiveIntelligencePanel />
+
+          {/* ═══ EXPERIMENT FRAMEWORK — PHASE XXIV ═══ */}
+          <ExperimentsPanel />
+
+          {/* ═══ DASHBOARD (VISÃO GERAL) — Monitoramento em tempo real ═══ */}
+
+          <section className="grid grid-cols-12 gap-4">
+            {/* ── Left Column: Panels stacked vertically ── */}
+            <div className="col-span-12 md:col-span-4 space-y-4">
+              <MarketProfileCard profile={marketProfile} />
+              <HistoryPanel onReplay={handleOpenReplay} />
+              <StrategyLifecycleCard instance={activeLifecycle} />
+
+              {/* Saúde do Robô */}
+              <PanelCard
+                icon={HeartPulse}
+                title="Saúde do Robô"
+                description="Pontuação de saúde e estabilidade."
+                status={
+                  <StatusBadge
+                    tone={
+                      !advisorContext?.robotHealth || advisorContext.robotHealth.score === 0
+                        ? "neutral"
+                        : advisorContext.robotHealth.score >= 60
+                          ? "success"
+                          : advisorContext.robotHealth.score >= 40
+                            ? "warning"
+                            : "danger"
+                    }
+                    label={
+                      advisorContext?.robotHealth ? advisorContext.robotHealth.label : "AGUARDANDO"
+                    }
+                  />
+                }
+              >
+                <div className="flex items-center gap-3">
+                  <div className="relative shrink-0">
+                    <svg width="44" height="44" viewBox="0 0 44 44">
+                      <circle
+                        cx="22"
+                        cy="22"
+                        r="18"
+                        fill="none"
+                        stroke="oklch(0.2 0.03 220)"
+                        strokeWidth="4"
+                      />
+                      <circle
+                        cx="22"
+                        cy="22"
+                        r="18"
+                        fill="none"
+                        className={
+                          !advisorContext?.robotHealth || advisorContext.robotHealth.score === 0
+                            ? "stroke-muted"
+                            : advisorContext.robotHealth.score >= 80
+                              ? "stroke-success"
+                              : advisorContext.robotHealth.score >= 60
+                                ? "stroke-success"
+                                : advisorContext.robotHealth.score >= 40
+                                  ? "stroke-warning"
+                                  : "stroke-danger"
+                        }
+                        strokeWidth="4"
+                        strokeLinecap="round"
+                        strokeDasharray={2 * Math.PI * 18}
+                        strokeDashoffset={
+                          advisorContext?.robotHealth
+                            ? 2 * Math.PI * 18 -
+                              (advisorContext.robotHealth.score / 100) * 2 * Math.PI * 18
+                            : 2 * Math.PI * 18
+                        }
+                        transform="rotate(-90 22 22)"
+                        style={{ transition: "stroke-dashoffset 1s ease-out" }}
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <span className="text-[11px] font-bold text-foreground">
+                        {advisorContext?.robotHealth ? advisorContext.robotHealth.score : "—"}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium text-foreground truncate">
+                      {advisorContext?.robotHealth
+                        ? advisorContext.robotHealth.label
+                        : "Aguardando"}
+                    </div>
+                  </div>
+                </div>
+              </PanelCard>
+
+              {/* Conselheiro (Advisor) */}
+              <PanelCard
+                icon={Brain}
+                title="Conselheiro"
+                description="Status da inteligência do robô."
+                status={
+                  advisorContext ? (
+                    <StatusBadge
+                      tone={ADVISOR_TONE[advisorContext.overallStatus] ?? "neutral"}
+                      label={advisorContext.overallStatus}
+                    />
+                  ) : (
+                    <StatusBadge tone="neutral" label="AGUARDANDO" />
+                  )
+                }
+              >
+                {!advisorContext ? (
+                  <div className="text-xs text-muted-foreground">Aguardando...</div>
+                ) : (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] text-muted-foreground">
+                      {advisorContext.recommendations.length} recomendações
+                      {advisorContext.alerts.length > 0 &&
+                        ` · ${advisorContext.alerts.length} alerta${advisorContext.alerts.length > 1 ? "s" : ""}`}
+                    </span>
+                  </div>
+                )}
+              </PanelCard>
+
+              <PerformancePanel />
+              <FinancePanel />
+            </div>
+
+            {/* ── Right Column: Calculadora (tall) ── */}
+            <div className="col-span-12 md:col-span-8 h-full">
+              <CalcPanel />
             </div>
           </section>
 
-          {/* FLOW CONTINUITY PRO - Asset Configuration */}
-          {active === "config-ativos" && <AssetsConfigPanel />}
-
-          {/* Broker + Finance + History */}
-          <section className="grid grid-cols-12 gap-4">
-            <BrokerCard />
-            <FinancePanel />
-            <HistoryPanel onReplay={handleOpenReplay} />
-          </section>
-
-          {/* Replay Card - Last Operation */}
+          {/* Última Operação (monitoramento) */}
           {store.replayContext && (
             <section className="grid grid-cols-12 gap-4">
-              <ReplayCard context={store.replayContext} onOpenDrawer={() => setReplayDrawerOpen(true)} />
+              <ReplayCard
+                context={store.replayContext}
+                onOpenDrawer={() => setReplayDrawerOpen(true)}
+              />
             </section>
           )}
 
-          {/* Analysis row */}
-          <section className="grid grid-cols-12 gap-4">
-            <AnalysisPanel chartTab={chartTab} setChartTab={setChartTab} />
-          </section>
+          {/* Strategy Timeline */}
+          {activeLifecycle && activeLifecycle.timeline.length > 1 && (
+            <section className="grid grid-cols-12 gap-4">
+              <div className="col-span-12">
+                <PanelCard
+                  icon={Activity}
+                  title="Ciclo da Estratégia"
+                  description="Linha do tempo dos estados da estratégia."
+                  status={<StatusBadge tone="info" label="MONITORANDO" />}
+                >
+                  <StrategyTimeline
+                    timeline={activeLifecycle.timeline}
+                    currentState={activeLifecycle.state}
+                  />
+                </PanelCard>
+              </div>
+            </section>
+          )}
 
-          {/* Calculator row */}
-          <section className="grid grid-cols-12 gap-4">
-            <CalcPanel />
-          </section>
-
-          {/* Ranking row */}
-          <section className="grid grid-cols-12 gap-4">
-            <RankingPanel />
-          </section>
-
-          {/* ═══ INTELLIGENCE SECTION ═══ */}
+          {/* Intelligence Section (feed + performance intelligence) */}
           <IntelligenceSection
             advisorContext={advisorContext}
             performanceContext={store.performanceContext}
             feedEntries={advisorHistory.getLast(20)}
           />
-
-          {/* Status bar */}
-          <section className="grid grid-cols-12 gap-4">
-            <PerformancePanel />
-          </section>
         </main>
 
         {/* Analyst Panel (Nexor AI) */}
@@ -1079,13 +1414,243 @@ function Dashboard() {
         </footer>
       </div>
 
-      {/* Modal de operação ativa */}
+      {/* Assets Config Modal - Updated with new component */}
+      {assetConfigModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+          <div 
+            className="absolute inset-0"
+            onClick={() => setAssetConfigModalOpen(false)}
+          />
+          <div className="relative w-full max-w-6xl mx-auto p-4 h-[75vh] overflow-y-auto rounded-xl border border-border bg-background shadow-2xl">
+            <AssetsAdvancedConfigPanel
+              key={assetConfigModalOpen ? "open" : "closed"}
+            />
+            <button
+              onClick={() => setAssetConfigModalOpen(false)}
+              className="absolute top-2 right-2 w-8 h-8 rounded-full bg-danger text-danger-foreground flex items-center justify-center hover:bg-danger/90 transition-colors z-50"
+            >
+              <X className="size-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de operação ativa (mantido por compatibilidade) */}
       <NewOperationModal
         activeOperation={robotState.activeOperation}
         onClose={() => setModalOpen(false)}
         onCancel={() => {}}
       />
+
     </div>
+  );
+}
+
+/* ---------------- NEXOR CONTROL CENTER ---------------- */
+
+type OperationProfile = "AUTO" | "FOREX" | "HYBRID_FLOW" | "HYBRID_PROBABILITY";
+type ControlTab = "perfil" | "decisao" | "ranking" | "performance" | "aprendizado" | "saude";
+
+const PROFILE_DESCRIPTIONS: Record<OperationProfile, string> = {
+  AUTO: "Seleção automática do mercado e do motor de decisão com base no contexto atual.",
+  FOREX: "Opera exclusivamente no motor Forex com indicadores cambiais dedicados.",
+  HYBRID_FLOW: "Fluxo de continuidade híbrido combinando estrutura de preço e momentum.",
+  HYBRID_PROBABILITY:
+    "Motor de probabilidade híbrido (Setup / ADX / EMA200 / ATR / Flow Index / Probability Score).",
+};
+
+interface NexorControlCenterProps {
+  robotState: RobotState;
+  marketProfile: MarketProfile;
+  learningContext: LearningContext | null;
+  chartTab: "grafico" | "estrutura";
+  setChartTab: (t: "grafico" | "estrutura") => void;
+  handleOpenReplay: (
+    ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext,
+  ) => void;
+  connected: boolean;
+}
+
+function NexorControlCenter({
+  robotState,
+  marketProfile,
+  learningContext,
+  chartTab,
+  setChartTab,
+  handleOpenReplay,
+  connected,
+}: NexorControlCenterProps) {
+  const [tab, setTab] = useState<ControlTab>("perfil");
+  const profile = (robotState.config.operationProfile ?? "AUTO") as OperationProfile;
+  const isActive = robotState.status === "running" || robotState.status === "waiting-result";
+
+  const TABS: TabDef[] = [
+    { key: "perfil", label: "Perfil Operacional", icon: Settings, state: "Ativo" },
+    { key: "decisao", label: "Motor de Decisão", icon: Brain, state: "Online" },
+    { key: "ranking", label: "Ranking de Ativos", icon: ListFilter, state: "Ao vivo" },
+    { key: "performance", label: "Performance", icon: Trophy, state: "Ativo" },
+    { key: "aprendizado", label: "Aprendizado", icon: BookOpen, state: "Online" },
+    { key: "saude", label: "Saúde do Robô", icon: Activity, state: "Monitorado" },
+  ];
+
+  return (
+    <section className="panel p-0 overflow-hidden border-primary/30 shadow-lg shadow-primary/5">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-5 py-4 border-b border-border bg-primary/5">
+        <div className="size-9 rounded-lg bg-primary/15 border border-primary/40 flex items-center justify-center">
+          <Zap className="size-5 text-primary" />
+        </div>
+        <div>
+          <div className="font-semibold tracking-wide text-primary">NEXOR CONTROL CENTER</div>
+          <div className="text-[10px] text-muted-foreground tracking-widest">
+            CENTRAL DE CONTROLE UNIFICADA
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <TabNav tabs={TABS} active={tab} onChange={(k) => setTab(k as ControlTab)} />
+
+      {/* Content */}
+      <div className="p-5">
+        {tab === "perfil" && (
+          <div className="space-y-4">
+            <OperationalProfileSelector />
+            <PanelCard
+              icon={Settings}
+              title="Resumo do Perfil"
+              description="Visão geral do perfil operacional."
+              status={<StatusBadge tone="info" label="ATIVO" />}
+            >
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div>
+                  <div className="text-[10px] text-muted-foreground">PERFIL ATUAL</div>
+                  <div className="font-semibold">{profile}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">MERCADO DETECTADO</div>
+                  <div className="font-semibold">{marketProfile.detectedMarket}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">ESTRATÉGIA</div>
+                  <div className="font-semibold truncate">{marketProfile.activeStrategyName}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground">CONFIANÇA</div>
+                  <div className="font-semibold">{marketProfile.confidence}%</div>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-3">{PROFILE_DESCRIPTIONS[profile]}</p>
+            </PanelCard>
+          </div>
+        )}
+
+        {tab === "decisao" && (
+          <div className="space-y-4">
+            <PanelCard
+              icon={Brain}
+              title="Motor de Decisão"
+              description="Engine responsável pela análise da operação atual."
+              status={
+                <StatusBadge
+                  tone={isActive ? "success" : "warning"}
+                  label={
+                    robotState.status === "running"
+                      ? "OPERANDO"
+                      : robotState.status === "waiting-result"
+                        ? "AGUARDANDO"
+                        : robotState.status === "paused"
+                          ? "PAUSADO"
+                          : "PARADO"
+                  }
+                  pulse={isActive}
+                />
+              }
+            >
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <MetricCard label="Perfil" value={profile} />
+                <MetricCard label="Mercado" value={marketProfile.detectedMarket} />
+                <MetricCard
+                  label="Status"
+                  value={
+                    robotState.status === "running"
+                      ? "OPERANDO"
+                      : robotState.status === "waiting-result"
+                        ? "AGUARDANDO"
+                        : robotState.status === "paused"
+                          ? "PAUSADO"
+                          : "PARADO"
+                  }
+                  accent={isActive ? "success" : "warning"}
+                  live={isActive}
+                />
+                <MetricCard
+                  label="Score"
+                  value={`${Math.round(
+                    robotState.lastAnalysis?.probability?.total ??
+                      robotState.lastAnalysis?.score?.total ??
+                      0,
+                  )}%`}
+                  accent="success"
+                />
+              </div>
+            </PanelCard>
+            {profile === "HYBRID_PROBABILITY" ? (
+              <HybridProbabilityPanel />
+            ) : (
+              <AnalysisPanel chartTab={chartTab} setChartTab={setChartTab} />
+            )}
+          </div>
+        )}
+
+        {tab === "ranking" && <RankingPanel />}
+
+        {tab === "performance" && (
+          <div className="grid grid-cols-12 gap-4">
+            <div className="col-span-12 lg:col-span-7">
+              <PerformancePanel />
+            </div>
+            <div className="col-span-12 lg:col-span-5 space-y-4">
+              <FinancePanel />
+              <HistoryPanel onReplay={handleOpenReplay} />
+            </div>
+          </div>
+        )}
+
+        {tab === "aprendizado" && <LearningInsightsCard context={learningContext} />}
+
+        {tab === "saude" && (
+          <div className="grid grid-cols-12 gap-4">
+            <div className="col-span-12">
+              <PanelCard
+                icon={Activity}
+                title="Status dos Módulos"
+                description="Estado dos módulos do robô."
+                status={<StatusBadge tone="info" label="MONITORADO" />}
+              >
+                <ModuleStatus
+                  label="Robô"
+                  state={isActive ? "online" : "offline"}
+                  value={robotState.status.toUpperCase()}
+                />
+                <ModuleStatus
+                  label="Sessão de Mercado"
+                  state={robotState.currentSession === "open" ? "online" : "waiting"}
+                  value={(robotState.currentSession ?? "—").toUpperCase()}
+                />
+                <ModuleStatus
+                  label="Conexão / WebSocket"
+                  state={connected ? "online" : "offline"}
+                  value={connected ? "STREAMING" : "SEM SINAL"}
+                />
+                <ModuleStatus label="Advisor" state="online" />
+                <ModuleStatus label="Motor de Decisão" state="online" value={profile} />
+              </PanelCard>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1108,10 +1673,12 @@ function BrokerCard() {
 
   if (connecting) {
     return (
-      <div className="panel col-span-2 p-4">
-        <div className="text-[10px] tracking-widest text-muted-foreground mb-3">
-          CONEXÃO PUMA BROKER
-        </div>
+      <PanelCard
+        icon={Plug}
+        title="Conexão Puma Broker"
+        description="Status da conexão com o broker Puma."
+        status={<StatusBadge tone="warning" label="CONECTANDO" pulse />}
+      >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <div className="size-9 rounded-full bg-warning/20 border border-warning/40 flex items-center justify-center text-warning font-bold">
@@ -1129,7 +1696,7 @@ function BrokerCard() {
         <div className="text-xs text-muted-foreground text-center py-4">
           Conectando ao servidor...
         </div>
-      </div>
+      </PanelCard>
     );
   }
 
@@ -1165,10 +1732,12 @@ function BrokerCard() {
     };
 
     return (
-      <div className="panel col-span-2 p-4">
-        <div className="text-[10px] tracking-widest text-muted-foreground mb-3">
-          CONEXÃO PUMA BROKER
-        </div>
+      <PanelCard
+        icon={Plug}
+        title="Conexão Puma Broker"
+        description="Status da conexão com o broker Puma."
+        status={<StatusBadge tone="danger" label="DESCONECTADO" />}
+      >
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <div className="size-9 rounded-full bg-danger/20 border border-danger/40 flex items-center justify-center text-danger font-bold">
@@ -1250,7 +1819,7 @@ function BrokerCard() {
             </button>
           </form>
         </div>
-      </div>
+      </PanelCard>
     );
   }
 
@@ -1263,10 +1832,12 @@ function BrokerCard() {
   const tipoConta = credentials?.accountType === "demo" ? "Conta Demo" : "Conta Real";
 
   return (
-    <div className="panel col-span-2 p-4">
-      <div className="text-[10px] tracking-widest text-muted-foreground mb-3">
-        CONEXÃO PUMA BROKER
-      </div>
+    <PanelCard
+      icon={Plug}
+      title="Conexão Puma Broker"
+      description="Status da conexão com o broker Puma."
+      status={<StatusBadge tone="success" label="CONECTADO" />}
+    >
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <div className="size-9 rounded-full bg-warning/20 border border-warning/40 flex items-center justify-center text-warning font-bold">
@@ -1292,7 +1863,7 @@ function BrokerCard() {
       >
         DESCONECTAR
       </button>
-    </div>
+    </PanelCard>
   );
 }
 
@@ -1396,12 +1967,18 @@ function AssetsConfigPanel() {
   const allAssets = Object.values(assetCategories).flat();
 
   return (
-    <section className="panel p-4 space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold tracking-wider text-foreground flex items-center gap-2">
-          <ListFilter className="size-4 text-success" />
-          CONFIGURAÇÃO DE ATIVOS PARA OPERAÇÃO
-        </h3>
+    <PanelCard
+      icon={Coins}
+      title="Configuração de Ativos"
+      description="Selecione os ativos operados."
+      status={
+        saved ? (
+          <StatusBadge tone="success" label="SALVO" />
+        ) : (
+          <StatusBadge tone="neutral" label="CONFIGURÁVEL" />
+        )
+      }
+      headerExtra={
         <div className="flex items-center gap-2">
           {saved && (
             <span className="text-[10px] text-success font-semibold flex items-center gap-1">
@@ -1423,8 +2000,9 @@ function AssetsConfigPanel() {
             )}
           </button>
         </div>
-      </div>
-
+      }
+      bodyClassName="space-y-4"
+    >
       <div className="text-[10px] text-muted-foreground tracking-widest mb-2">
         {selectedAssets.length} de {allAssets.length} ativos selecionados • Modo:{" "}
         {state.config.scanMode === "multi" ? "MULTI-ASSET (Varredura)" : "SINGLE (Um ativo)"}
@@ -1501,7 +2079,7 @@ function AssetsConfigPanel() {
         <Zap className="size-3.5 text-warning ml-auto" />
         <span className="text-xs text-warning font-semibold">Aplicado na próxima análise</span>
       </div>
-    </section>
+    </PanelCard>
   );
 }
 
@@ -1514,55 +2092,6 @@ function Row({ k, v }: { k: string; v: string }) {
   );
 }
 
-function Metric({
-  label,
-  value,
-  sub,
-  badge,
-  flag,
-  accent,
-  status,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  badge?: string;
-  flag?: string;
-  accent?: boolean;
-  status?: boolean;
-}) {
-  return (
-    <div
-      className={`panel flex-1 min-w-0 p-3 border-l-[3px] ${accent ? "border-l-success" : status ? "border-l-success" : "border-l-border"}`}
-    >
-      <div className="text-[10px] font-semibold tracking-widest text-muted-foreground mb-2 flex items-center gap-1.5">
-        {flag && <span className="text-sm">{flag}</span>}
-        {label}
-      </div>
-      <div className="flex items-center gap-2">
-        {status && <span className="size-2.5 rounded-full bg-success animate-pulse shrink-0" />}
-        <span
-          className={`text-lg font-extrabold tracking-tight truncate ${accent && value.startsWith("+") ? "text-success" : accent && value.startsWith("-") ? "text-danger" : accent || status ? "text-success" : "text-foreground"}`}
-        >
-          {value}
-        </span>
-        {badge && (
-          <span className="text-[10px] bg-success/15 text-success px-2 py-0.5 rounded-full font-bold tracking-wider shrink-0">
-            {badge}
-          </span>
-        )}
-      </div>
-      {sub && (
-        <div
-          className={`text-[11px] mt-1.5 font-medium ${sub.startsWith("+") ? "text-success" : sub.startsWith("-") ? "text-danger" : "text-muted-foreground"}`}
-        >
-          {sub}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function AnalysisPanel({
   chartTab,
   setChartTab,
@@ -1571,6 +2100,7 @@ function AnalysisPanel({
   setChartTab: (t: "grafico" | "estrutura") => void;
 }) {
   const { state, updateConfig } = useRobot();
+  const store = useAnalystStore();
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -1687,19 +2217,16 @@ function AnalysisPanel({
   };
 
   return (
-    <div className="panel col-span-12 p-4">
-      <div className="flex items-center gap-2 mb-4">
-        <Activity className="size-4 text-success" />
-        <h3 className="text-sm font-semibold tracking-wide">
-          ROBOT ANALYSIS - FLOW CONTINUITY PRO
-        </h3>
-      </div>
+    <PanelCard
+      icon={Activity}
+      title="Análise do Fluxo"
+      description="Continuidade e filtros do robô."
+      status={<StatusBadge tone="info" label="ANÁLISE" />}
+    >
       <div className="grid grid-cols-12 gap-4">
         {/* Motor de Score */}
         <div className="col-span-4">
-          <div className="text-[10px] tracking-widest text-muted-foreground mb-3">
-            SCORE ENGINE
-          </div>
+          <div className="text-[10px] tracking-widest text-muted-foreground mb-3">SCORE ENGINE</div>
           <div className="space-y-1.5">
             {scoreItems.map((s) => (
               <div
@@ -1715,10 +2242,10 @@ function AnalysisPanel({
                   <span className="truncate">{s.label}</span>
                 </span>
                 <span className="flex items-center gap-3 shrink-0 ml-2">
-                  <span className="text-[10px] text-muted-foreground font-mono">
-                    W:{s.weight}
-                  </span>
-                  <span className={`font-mono font-semibold ${s.ok ? "text-success" : "text-danger"}`}>
+                  <span className="text-[10px] text-muted-foreground font-mono">W:{s.weight}</span>
+                  <span
+                    className={`font-mono font-semibold ${s.ok ? "text-success" : "text-danger"}`}
+                  >
                     +{s.contribution}
                   </span>
                 </span>
@@ -1770,7 +2297,7 @@ function AnalysisPanel({
               <div className="flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">Market</span>
                 <span className="font-mono text-foreground/80">
-                  {state.config.asset || state.lastScannedAsset || "—"}
+                  {store.market.asset || state.lastScannedAsset || "—"}
                 </span>
               </div>
               <div className="flex items-center justify-between text-xs">
@@ -1783,9 +2310,7 @@ function AnalysisPanel({
           {/* Configuração do Robô */}
           <div className="mt-6 border-t border-border pt-4">
             <div className="flex items-center justify-between mb-3">
-              <div className="text-[10px] tracking-widest text-muted-foreground">
-                ROBOT CONFIG
-              </div>
+              <div className="text-[10px] tracking-widest text-muted-foreground">ROBOT CONFIG</div>
               <button
                 onClick={handleSaveConfig}
                 disabled={saving}
@@ -1835,7 +2360,7 @@ function AnalysisPanel({
                 </div>
                 <div className="bg-secondary/40 rounded p-2">
                   <div className="text-[10px] text-muted-foreground">ANALYSIS INTERVAL</div>
-                  <div className="font-mono text-blue-400 font-bold">
+                  <div className="font-mono text-info font-bold">
                     {state.config.reAnalysisIntervalSec}s
                   </div>
                 </div>
@@ -1853,7 +2378,7 @@ function AnalysisPanel({
                 <span
                   className={`px-2 py-1 rounded text-[10px] font-medium ${
                     state.config.autoDirection
-                      ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
+                      ? "bg-info/15 text-info border border-info/30"
                       : "bg-secondary text-muted-foreground border border-border"
                   }`}
                 >
@@ -1885,7 +2410,7 @@ function AnalysisPanel({
             ))}
           </div>
           <div className="text-[10px] text-muted-foreground mb-2">
-            {getAssetDisplayName(state.lastScannedAsset || state.config.asset || "EURUSD")} ·{" "}
+            {getAssetDisplayName(store.market.asset || state.lastScannedAsset || "EURUSD")} ·{" "}
             {state.selectedTimeframe || state.config.timeframes?.[0] || "M1"}
           </div>
           <CandleChart />
@@ -1912,9 +2437,7 @@ function AnalysisPanel({
                 </span>
                 <span
                   className={`text-[10px] font-semibold px-1.5 py-0.5 rounded shrink-0 ml-2 ${
-                    f.ok
-                      ? "bg-success/15 text-success"
-                      : "bg-danger/15 text-danger"
+                    f.ok ? "bg-success/15 text-success" : "bg-danger/15 text-danger"
                   }`}
                 >
                   {f.statusText}
@@ -1923,7 +2446,9 @@ function AnalysisPanel({
             ))}
           </div>
           <div className="mt-4 border-t border-border pt-3">
-            <div className="text-[10px] tracking-widest text-muted-foreground mb-2">DECISION STATUS</div>
+            <div className="text-[10px] tracking-widest text-muted-foreground mb-2">
+              DECISION STATUS
+            </div>
             <div
               className={`text-xs font-semibold ${
                 state.status === "running"
@@ -1953,7 +2478,7 @@ function AnalysisPanel({
           </div>
         </div>
       </div>
-    </div>
+    </PanelCard>
   );
 }
 
@@ -2020,6 +2545,7 @@ function CandleChart() {
 
 function RankingPanel() {
   const { state } = useRobot();
+  const store = useAnalystStore();
   const { adapter, connected } = useBroker();
   const [rankingData, setRankingData] = useState<
     Array<{ rank: number; asset: string; flag: string; score: number; wr: string; ops: number }>
@@ -2036,7 +2562,9 @@ function RankingPanel() {
       const scanLog = state.scanLog || [];
       const ops = state.operations || [];
 
-      // Build from scan log and operations
+      // Build from scan log and operations — use shared ranking utility
+      const bestByAsset = getBestEntryPerAsset(scanLog);
+
       const assetStats: Record<
         string,
         { wins: number; losses: number; score: number; ops: number }
@@ -2047,12 +2575,12 @@ function RankingPanel() {
         assetStats[a] = { wins: 0, losses: 0, score: 0, ops: 0 };
       });
 
-      // Merge scan log scores
-      scanLog.forEach((entry) => {
-        if (!assetStats[entry.asset]) {
-          assetStats[entry.asset] = { wins: 0, losses: 0, score: entry.score, ops: 0 };
+      // Merge scan log scores — Highest Score Wins per asset
+      bestByAsset.forEach((entry, asset) => {
+        if (!assetStats[asset]) {
+          assetStats[asset] = { wins: 0, losses: 0, score: entry.score, ops: 0 };
         } else {
-          assetStats[entry.asset].score = entry.score;
+          assetStats[asset].score = entry.score;
         }
       });
 
@@ -2068,11 +2596,14 @@ function RankingPanel() {
           else if (op.result === "loss") assetStats[op.asset].losses++;
         });
 
-      // Use lastAnalysis score for current asset
+      // Use lastAnalysis score for current asset (override only if higher)
       if (state.lastAnalysis?.probability?.total) {
-        const currentAsset = state.lastScannedAsset || state.config.asset;
-        if (assetStats[currentAsset]) {
-          assetStats[currentAsset].score = state.lastAnalysis.probability.total;
+        const currentAsset = store.market.asset || state.lastScannedAsset || "";
+        if (currentAsset && assetStats[currentAsset]) {
+          const lastScore = state.lastAnalysis.probability.total;
+          if (lastScore > assetStats[currentAsset].score) {
+            assetStats[currentAsset].score = lastScore;
+          }
         }
       }
 
@@ -2099,16 +2630,12 @@ function RankingPanel() {
     return () => clearInterval(interval);
   }, [connected, adapter, state]);
   return (
-    <div className="panel col-span-12 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold flex items-center gap-2">
-          <Trophy className="size-4 text-success" />
-          RANKING DE ATIVOS (M1)
-        </h3>
-        <span className="text-[10px] text-muted-foreground">
-          {`Atualizado: ${new Date().toLocaleTimeString("pt-BR")}`}
-        </span>
-      </div>
+    <PanelCard
+      icon={Trophy}
+      title="Ranking de Ativos"
+      description="Ativos ranqueados por desempenho."
+      status={<StatusBadge tone="info" label="RANKING" />}
+    >
       <div className="text-[10px] text-muted-foreground grid grid-cols-12 gap-1 px-2 pb-2 border-b border-border tracking-wider">
         <span className="col-span-1">#</span>
         <span className="col-span-4">ATIVO</span>
@@ -2145,7 +2672,7 @@ function RankingPanel() {
       <button className="w-full mt-3 py-2 text-xs border border-border rounded hover:bg-accent">
         VER TODOS OS ATIVOS
       </button>
-    </div>
+    </PanelCard>
   );
 }
 
@@ -2194,7 +2721,13 @@ function CalcPanel() {
     setCfgMaxLevel(state.config.maxLevel);
     setCfgStopLoss(state.config.stopLoss);
     setCfgStopWin(state.config.targetProfit);
-  }, [state.config.initialStake, state.config.payout, state.config.maxLevel, state.config.stopLoss, state.config.targetProfit]);
+  }, [
+    state.config.initialStake,
+    state.config.payout,
+    state.config.maxLevel,
+    state.config.stopLoss,
+    state.config.targetProfit,
+  ]);
 
   const handleSaveConfig = async () => {
     setSaving(true);
@@ -2226,12 +2759,14 @@ function CalcPanel() {
   };
 
   return (
-    <div className="panel col-span-12 p-4">
-      <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-        <Calculator className="size-4 text-success" />
-        CALCULADORA SOROSGALE - NÍVEL ATUAL
-      </h3>
-      <div className="grid grid-cols-12 gap-3">
+    <PanelCard
+      icon={Calculator}
+      title="Calculadora SorosGale"
+      description="Simulação de recuperação de saldo."
+      status={<StatusBadge tone="neutral" label="FERRAMENTA" />}
+      className="h-full flex flex-col"
+    >
+      <div className="grid grid-cols-12 gap-3 flex-1">
         <div className="col-span-3 space-y-3">
           <Stat title="NÍVEL ATUAL" value={String(nivelAtual)} big />
           <div>
@@ -2374,9 +2909,7 @@ function CalcPanel() {
               disabled={isRunning}
               className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             />
-            <div className="text-[9px] text-muted-foreground mt-1">
-              Entrada 1 no Nível 0
-            </div>
+            <div className="text-[9px] text-muted-foreground mt-1">Entrada 1 no Nível 0</div>
           </div>
           <div>
             <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
@@ -2410,9 +2943,7 @@ function CalcPanel() {
               disabled={isRunning}
               className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             />
-            <div className="text-[9px] text-muted-foreground mt-1">
-              Proteção de segurança
-            </div>
+            <div className="text-[9px] text-muted-foreground mt-1">Proteção de segurança</div>
           </div>
           <div>
             <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
@@ -2427,9 +2958,7 @@ function CalcPanel() {
               disabled={isRunning}
               className="w-full bg-background border border-border rounded-md px-3 py-2 text-xs font-mono focus:border-success focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             />
-            <div className="text-[9px] text-muted-foreground mt-1">
-              Limite de perda diária
-            </div>
+            <div className="text-[9px] text-muted-foreground mt-1">Limite de perda diária</div>
           </div>
           <div>
             <label className="text-[10px] text-muted-foreground tracking-widest block mb-1">
@@ -2472,12 +3001,10 @@ function CalcPanel() {
             Valores geram a tabela automaticamente. Stake Inicial + Payout definem Entry 2 (Soros).
           </span>
           <Zap className="size-3.5 text-warning ml-auto" />
-          <span className="text-xs text-warning font-semibold">
-            Aplicado na próxima sessão
-          </span>
+          <span className="text-xs text-warning font-semibold">Aplicado na próxima sessão</span>
         </div>
       </div>
-    </div>
+    </PanelCard>
   );
 }
 
@@ -2528,8 +3055,12 @@ function FinancePanel() {
   ];
 
   return (
-    <div className="panel col-span-2 p-4">
-      <h3 className="text-sm font-semibold mb-3">RESUMO FINANCEIRO</h3>
+    <PanelCard
+      icon={History}
+      title="Histórico"
+      description="Últimas operações executadas."
+      status={<StatusBadge tone="neutral" label="VAZIO" />}
+    >
       <div className="space-y-2.5">
         {rows.map((r) => (
           <div key={r.k} className="flex justify-between text-xs">
@@ -2541,11 +3072,17 @@ function FinancePanel() {
       <button className="w-full mt-4 py-2 rounded border border-border text-xs font-semibold hover:bg-accent">
         EDITAR ESTRATÉGIA
       </button>
-    </div>
+    </PanelCard>
   );
 }
 
-function HistoryPanel({ onReplay }: { onReplay: (ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext) => void }) {
+function HistoryPanel({
+  onReplay,
+}: {
+  onReplay: (
+    ctx: import("../modules/flow-continuity/types/replay-context.types").ReplayContext,
+  ) => void;
+}) {
   useEffect(() => {
     return () => console.log("[UNMOUNT] HistoryPanel");
   }, []);
@@ -2796,7 +3333,8 @@ function HistoryPanel({ onReplay }: { onReplay: (ctx: import("../modules/flow-co
           second: "2-digit",
         });
     }
-    if (op.expiration && op.openedAt) return fmtTime((op.openedAt as number) + (op.expiration as number) * 1000);
+    if (op.expiration && op.openedAt)
+      return fmtTime((op.openedAt as number) + (op.expiration as number) * 1000);
     if (op.openedAt) return fmtTime((op.openedAt as number) + 60000);
     return "—";
   };
@@ -2820,16 +3358,12 @@ function HistoryPanel({ onReplay }: { onReplay: (ctx: import("../modules/flow-co
   };
 
   return (
-    <div className="panel col-span-8 p-4">
-      <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-semibold">HISTÓRICO RECENTE</h3>
-        <div className="flex items-center gap-3">
-          <span className="text-[10px] text-muted-foreground">{allOps.length} op.</span>
-          <button onClick={fetchTrades} className="text-[10px] text-success hover:underline">
-            ATUALIZAR
-          </button>
-        </div>
-      </div>
+    <PanelCard
+      icon={TrendingUp}
+      title="Performance"
+      description="Métricas de desempenho acumulado."
+      status={<StatusBadge tone="info" label="MONITORANDO" />}
+    >
       {/* Cabeçalho */}
       <div className="grid grid-cols-8 gap-1 text-[10px] text-muted-foreground tracking-widest px-3 pb-2 border-b border-border">
         <span>ENTRADA</span>
@@ -2909,9 +3443,10 @@ function HistoryPanel({ onReplay }: { onReplay: (ctx: import("../modules/flow-co
                 {!isPending ? (
                   <button
                     onClick={() => {
-                      const match = store.replayHistory.find(
-                        (r) => r.operationContext.timestamp === op.openedAt
-                      ) || store.replayContext;
+                      const match =
+                        store.replayHistory.find(
+                          (r) => r.operationContext.timestamp === op.openedAt,
+                        ) || store.replayContext;
                       if (match) onReplay(match);
                     }}
                     className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition-colors ${
@@ -2929,7 +3464,7 @@ function HistoryPanel({ onReplay }: { onReplay: (ctx: import("../modules/flow-co
           );
         })}
       </div>
-    </div>
+    </PanelCard>
   );
 }
 
@@ -2985,34 +3520,12 @@ function PerformancePanel() {
   });
 
   return (
-    <div className="panel col-span-12 p-4">
-      <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-semibold">DESEMPENHO DO DIA</h3>
-        <div className="flex gap-6 text-xs">
-          <div>
-            <span className="text-muted-foreground">Lucro </span>
-            <span
-              className={
-                state.sessionProfit >= 0 ? "text-success font-bold" : "text-danger font-bold"
-              }
-            >
-              {profitFmt}
-            </span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Operações </span>
-            <span className="font-bold">{totalOps}</span>
-          </div>
-          <div>
-            <span className="text-muted-foreground">Win Rate </span>
-            <span
-              className={state.winRate >= 50 ? "text-success font-bold" : "text-danger font-bold"}
-            >
-              {state.winRate.toFixed(0)}%
-            </span>
-          </div>
-        </div>
-      </div>
+    <PanelCard
+      icon={TrendingUp}
+      title="Desempenho do Dia"
+      description="Resultado financeiro da sessão."
+      status={<StatusBadge tone="info" label="SESSÃO" />}
+    >
       <svg viewBox="0 0 500 160" className="w-full h-40">
         <defs>
           <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
@@ -3043,7 +3556,7 @@ function PerformancePanel() {
         <span>20:00</span>
         <span>24:00</span>
       </div>
-    </div>
+    </PanelCard>
   );
 }
 
@@ -3162,9 +3675,7 @@ function NewOperationModal({
             </div>
           </div>
           <div>
-            <div className="text-[10px] text-muted-foreground tracking-widest">
-              ENTRY AMOUNT
-            </div>
+            <div className="text-[10px] text-muted-foreground tracking-widest">ENTRY AMOUNT</div>
             <div className="text-sm font-bold mt-1">
               R${(activeOperation.amount || 0).toFixed(2)}
             </div>
@@ -3192,7 +3703,10 @@ function NewOperationModal({
             <div>
               <div className="text-[10px] text-muted-foreground tracking-widest">TIMEFRAME</div>
               <div className="text-sm font-bold mt-1">
-                {activeOperation.timeframe || robotState.selectedTimeframe || robotState.config.timeframes[0] || "M1"}
+                {activeOperation.timeframe ||
+                  robotState.selectedTimeframe ||
+                  robotState.config.timeframes[0] ||
+                  "M1"}
               </div>
             </div>
             <div>

@@ -1,12 +1,12 @@
 import type { HeatmapData } from "../types/performance-context.types";
 
 function getHeatColor(value: number): string {
-  if (value >= 70) return "bg-emerald-500/80 text-white";
-  if (value >= 60) return "bg-emerald-500/50 text-white";
-  if (value >= 50) return "bg-emerald-500/30";
-  if (value >= 40) return "bg-amber-500/30";
-  if (value >= 30) return "bg-amber-500/50";
-  if (value > 0) return "bg-red-500/30";
+  if (value >= 70) return "bg-success/80 text-white";
+  if (value >= 60) return "bg-success/50 text-white";
+  if (value >= 50) return "bg-success/30";
+  if (value >= 40) return "bg-warning/30";
+  if (value >= 30) return "bg-warning/50";
+  if (value > 0) return "bg-danger/30";
   return "bg-secondary text-muted-foreground";
 }
 

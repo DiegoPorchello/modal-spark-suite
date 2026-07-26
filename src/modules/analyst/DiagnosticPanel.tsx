@@ -31,11 +31,11 @@ const STEP_CONFIG: {
 ];
 
 const STATUS_STYLES: Record<string, { dot: string; text: string; bg: string }> = {
-  loading: { dot: "bg-yellow-400 animate-pulse", text: "text-yellow-400", bg: "bg-yellow-400/10" },
-  ok: { dot: "bg-emerald-400", text: "text-emerald-400", bg: "bg-emerald-400/10" },
-  error: { dot: "bg-red-400", text: "text-red-400", bg: "bg-red-400/10" },
-  blocked: { dot: "bg-orange-400", text: "text-orange-400", bg: "bg-orange-400/10" },
-  authorized: { dot: "bg-blue-400", text: "text-blue-400", bg: "bg-blue-400/10" },
+  loading: { dot: "bg-warning animate-pulse", text: "text-warning", bg: "bg-warning/10" },
+  ok: { dot: "bg-success", text: "text-success", bg: "bg-success/10" },
+  error: { dot: "bg-danger", text: "text-danger", bg: "bg-danger/10" },
+  blocked: { dot: "bg-warning", text: "text-warning", bg: "bg-warning/10" },
+  authorized: { dot: "bg-info", text: "text-info", bg: "bg-info/10" },
   unknown: { dot: "bg-gray-400", text: "text-gray-400", bg: "bg-gray-400/10" },
 };
 

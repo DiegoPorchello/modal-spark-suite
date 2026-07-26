@@ -21,34 +21,34 @@ export const FilterIndicator: React.FC<FilterIndicatorProps> = ({
     switch (status) {
       case "good":
         return {
-          bg: "bg-green-500/15",
-          border: "border-green-500/40",
-          text: "text-green-400",
-          glow: "shadow-green-500/30",
+          bg: "bg-success/15",
+          border: "border-success/40",
+          text: "text-success",
+          glow: "shadow-success/30",
           label: "✅",
         };
       case "warning":
         return {
-          bg: "bg-yellow-500/15",
-          border: "border-yellow-500/40",
-          text: "text-yellow-400",
-          glow: "shadow-yellow-500/30",
+          bg: "bg-warning/15",
+          border: "border-warning/40",
+          text: "text-warning",
+          glow: "shadow-warning/30",
           label: "⚠️",
         };
       case "error":
         return {
-          bg: "bg-red-500/15",
-          border: "border-red-500/40",
-          text: "text-red-400",
-          glow: "shadow-red-500/30",
+          bg: "bg-danger/15",
+          border: "border-danger/40",
+          text: "text-danger",
+          glow: "shadow-danger/30",
           label: "❌",
         };
       case "info":
         return {
-          bg: "bg-blue-500/15",
-          border: "border-blue-500/40",
-          text: "text-blue-400",
-          glow: "shadow-blue-500/30",
+          bg: "bg-info/15",
+          border: "border-info/40",
+          text: "text-info",
+          glow: "shadow-info/30",
           label: "ℹ️",
         };
     }

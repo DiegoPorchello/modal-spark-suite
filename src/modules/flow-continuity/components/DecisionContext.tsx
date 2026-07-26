@@ -17,16 +17,16 @@ interface DecisionContextPanelProps {
 }
 
 const DECISION_COLORS: Record<string, string> = {
-  CALL: "text-emerald-400",
-  PUT: "text-red-400",
-  WAIT: "text-amber-400",
-  REJECT: "text-zinc-400",
+  CALL: "text-success",
+  PUT: "text-danger",
+  WAIT: "text-warning",
+  REJECT: "text-muted-foreground",
 };
 
 const DECISION_BG: Record<string, string> = {
-  CALL: "bg-emerald-500/10",
-  PUT: "bg-red-500/10",
-  WAIT: "bg-amber-500/10",
+  CALL: "bg-success/10",
+  PUT: "bg-danger/10",
+  WAIT: "bg-warning/10",
   REJECT: "bg-zinc-500/10",
 };
 
@@ -37,9 +37,9 @@ const CONFIDENCE_LABEL = (c: number): string => {
 };
 
 const CONFIDENCE_COLOR = (c: number): string => {
-  if (c >= 0.8) return "text-emerald-400";
-  if (c >= 0.5) return "text-amber-400";
-  return "text-zinc-400";
+  if (c >= 0.8) return "text-success";
+  if (c >= 0.5) return "text-warning";
+  return "text-muted-foreground";
 };
 
 export const DecisionContextPanel: React.FC<DecisionContextPanelProps> = ({
@@ -109,14 +109,14 @@ export const DecisionContextPanel: React.FC<DecisionContextPanelProps> = ({
 
       {/* Approved Filters */}
       {context.approvedFilters.length > 0 && (
-        <div className="bg-emerald-500/5 rounded p-2">
-          <div className="text-[10px] text-emerald-400 font-semibold mb-1">
+        <div className="bg-success/5 rounded p-2">
+          <div className="text-[10px] text-success font-semibold mb-1">
             APPROVED ({context.approvedFilters.length})
           </div>
           <div className="space-y-0.5">
             {context.approvedFilters.map((f) => (
               <div key={f.id} className="text-[11px] text-foreground/70">
-                {f.name}: <span className="text-emerald-400">{f.contribution}/{f.weight}</span>
+                {f.name}: <span className="text-success">{f.contribution}/{f.weight}</span>
               </div>
             ))}
           </div>
@@ -125,14 +125,14 @@ export const DecisionContextPanel: React.FC<DecisionContextPanelProps> = ({
 
       {/* Rejected Filters */}
       {context.rejectedFilters.length > 0 && (
-        <div className="bg-red-500/5 rounded p-2">
-          <div className="text-[10px] text-red-400 font-semibold mb-1">
+        <div className="bg-danger/5 rounded p-2">
+          <div className="text-[10px] text-danger font-semibold mb-1">
             REJECTED ({context.rejectedFilters.length})
           </div>
           <div className="space-y-0.5">
             {context.rejectedFilters.map((f) => (
               <div key={f.id} className="text-[11px] text-foreground/70">
-                {f.name}: <span className="text-red-400">{f.contribution}/{f.weight}</span>
+                {f.name}: <span className="text-danger">{f.contribution}/{f.weight}</span>
               </div>
             ))}
           </div>

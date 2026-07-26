@@ -87,10 +87,10 @@ export const RealTimeChart: React.FC<RealTimeChartProps> = ({
 
   const getStatusColor = () => {
     switch (engine?.state.status) {
-      case "running": return "bg-green-500/20 text-green-400 border-green-500/40";
-      case "paused": return "bg-yellow-500/20 text-yellow-400 border-yellow-500/40";
+      case "running": return "bg-success/20 text-success border-success/40";
+      case "paused": return "bg-warning/20 text-warning border-warning/40";
       case "stopped": return "bg-gray-500/20 text-gray-400 border-gray-500/40";
-      default: return "bg-blue-500/20 text-blue-400 border-blue-500/40";
+      default: return "bg-info/20 text-info border-info/40";
     }
   };
 

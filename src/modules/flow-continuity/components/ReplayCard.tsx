@@ -1,5 +1,7 @@
 import { Play, TrendingUp, CheckCircle2, Trophy, RotateCcw } from "lucide-react";
 import type { ReplayContext } from "../types/replay-context.types";
+import { PanelCard } from "../../../components/ui/PanelCard";
+import { StatusBadge } from "../../../components/ui/StatusBadge";
 
 const STEP_LABELS: Record<string, string> = {
   "market.classified": "Mercado analisado",
@@ -35,7 +37,7 @@ function formatTime(ts: number): string {
 
 function ScoreBarInline({ score }: { score: number }) {
   const pct = Math.min(100, Math.max(0, score));
-  const color = pct >= 85 ? "bg-success" : pct >= 70 ? "bg-success/80" : pct >= 60 ? "bg-warning" : pct >= 40 ? "bg-orange-500" : "bg-danger";
+  const color = pct >= 85 ? "bg-success" : pct >= 70 ? "bg-success/80" : pct >= 60 ? "bg-warning" : pct >= 40 ? "bg-warning" : "bg-danger";
   return (
     <div className="flex-1 bg-secondary/40 rounded p-1.5">
       <div className="flex items-center justify-between mb-1">
@@ -81,12 +83,17 @@ export function ReplayCard({
   const durationSec = Math.round(context.durationMs / 1000);
 
   return (
-    <div className="panel col-span-4 p-4 border-l-[3px] border-l-primary">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Play className="size-3.5 text-primary" />
-          <h3 className="text-xs font-semibold tracking-wider">REPLAY DA ÚLTIMA OPERAÇÃO</h3>
-        </div>
+    <PanelCard
+      icon={Play}
+      title="Replay da Última Operação"
+      description="Reconstrução da operação monitorada."
+      status={
+        <StatusBadge
+          tone={context.result === "WIN" ? "success" : context.result === "LOSS" ? "danger" : context.result === "BREAKEVEN" ? "warning" : "neutral"}
+          label={context.result || "AGUARDANDO"}
+        />
+      }
+      headerExtra={
         <button
           onClick={onOpenDrawer}
           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-primary/10 text-primary text-[10px] font-semibold hover:bg-primary/20 transition-colors"
@@ -94,7 +101,8 @@ export function ReplayCard({
           <Play className="size-2.5" />
           Assistir
         </button>
-      </div>
+      }
+    >
 
       {/* Result Header */}
       <div className={`rounded-lg p-3 mb-3 ${resultBg}`}>
@@ -139,6 +147,6 @@ export function ReplayCard({
         <ScoreBarInline score={o.score} />
         <ConfidenceBarInline value={d.confidence} />
       </div>
-    </div>
+    </PanelCard>
   );
 }

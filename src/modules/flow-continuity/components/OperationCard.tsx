@@ -32,9 +32,9 @@ export const OperationCard: React.FC<OperationCardProps> = ({
   };
 
   const getStatusColor = () => {
-    if (isSuccessful) return "text-green-400 bg-green-500/15 border-green-500/40";
-    if (isActive) return "text-yellow-400 bg-yellow-500/15 border-yellow-500/40";
-    return "text-red-400 bg-red-500/15 border-red-500/40";
+    if (isSuccessful) return "text-success bg-success/15 border-success/40";
+    if (isActive) return "text-warning bg-warning/15 border-warning/40";
+    return "text-danger bg-danger/15 border-danger/40";
   };
 
   const getStatusLabel = () => {
@@ -45,9 +45,9 @@ export const OperationCard: React.FC<OperationCardProps> = ({
 
   const getTimeframeColor = (timeframe: string) => {
     const colors: Record<string, string> = {
-      M1: "text-blue-400 bg-blue-500/15 border-blue-500/40",
-      M5: "text-purple-400 bg-purple-500/15 border-purple-500/40",
-      M15: "text-orange-400 bg-orange-500/15 border-orange-500/40",
+      M1: "text-info bg-info/15 border-info/40",
+      M5: "text-primary bg-primary/15 border-primary/40",
+      M15: "text-warning bg-warning/15 border-warning/40",
       DEFAULT: "text-muted-foreground bg-muted/15 border-muted/40",
     };
     return colors[timeframe] || colors.DEFAULT;
@@ -56,7 +56,7 @@ export const OperationCard: React.FC<OperationCardProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm">
       <div className="panel w-[420px] p-5 shadow-2xl glow-success relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-green-500/50 via-yellow-500/50 to-red-500/50" />
+        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-success/50 via-warning/50 to-danger/50" />
 
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-sm font-bold tracking-wide text-foreground">OPERAÇÃO EM TEMPO REAL</h3>
@@ -81,11 +81,11 @@ export const OperationCard: React.FC<OperationCardProps> = ({
             <div className={`text-sm font-bold mt-1 ${getStatusColor()} px-2 py-1 rounded text-center text-xs`}>{getStatusLabel()}</div>
             <div className="flex gap-1 mt-1 justify-center">
               {isSuccessful ? (
-                <> <span className="size-1.5 rounded-full bg-green-500 animate-pulse" /> <span className="size-1.5 rounded-full bg-green-500/60" /> <span className="size-1.5 rounded-full bg-green-500/30" /> </>
+                <> <span className="size-1.5 rounded-full bg-success animate-pulse" /> <span className="size-1.5 rounded-full bg-success/60" /> <span className="size-1.5 rounded-full bg-success/30" /> </>
               ) : isActive ? (
-                <> <span className="size-1.5 rounded-full bg-yellow-500 animate-pulse" /> <span className="size-1.5 rounded-full bg-yellow-500/60" /> <span className="size-1.5 rounded-full bg-yellow-500/30" /> </>
+                <> <span className="size-1.5 rounded-full bg-warning animate-pulse" /> <span className="size-1.5 rounded-full bg-warning/60" /> <span className="size-1.5 rounded-full bg-warning/30" /> </>
               ) : (
-                <> <span className="size-1.5 rounded-full bg-red-500 animate-pulse" /> <span className="size-1.5 rounded-full bg-red-500/60" /> <span className="size-1.5 rounded-full bg-red-500/30" /> </>
+                <> <span className="size-1.5 rounded-full bg-danger animate-pulse" /> <span className="size-1.5 rounded-full bg-danger/60" /> <span className="size-1.5 rounded-full bg-danger/30" /> </>
               )}
             </div>
           </div>

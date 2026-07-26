@@ -31,7 +31,7 @@ export function AssetRanking({ assets }: { assets: AssetPerformance[] }) {
             <div className="text-right">
               <div
                 className={`text-xs font-bold ${
-                  a.netProfit >= 0 ? "text-emerald-400" : "text-red-400"
+                  a.netProfit >= 0 ? "text-success" : "text-danger"
                 }`}
               >
                 {a.netProfit >= 0 ? "+" : ""}R${a.netProfit.toFixed(2)}

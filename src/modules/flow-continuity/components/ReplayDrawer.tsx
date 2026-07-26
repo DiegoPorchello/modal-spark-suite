@@ -15,27 +15,27 @@ const STEP_LABELS: Record<string, string> = {
 };
 
 const STEP_COLORS: Record<string, string> = {
-  "market.classified": "bg-blue-500",
-  "strategy.selected": "bg-purple-500",
-  "score.calculated": "bg-amber-500",
-  "filters.approved": "bg-emerald-500",
-  "decision.made": "bg-cyan-500",
-  "order.sent": "bg-orange-500",
-  "broker.confirmed": "bg-green-500",
-  "trade.opened": "bg-blue-400",
-  "trade.closed": "bg-emerald-400",
+  "market.classified": "bg-info",
+  "strategy.selected": "bg-primary",
+  "score.calculated": "bg-warning",
+  "filters.approved": "bg-success",
+  "decision.made": "bg-info",
+  "order.sent": "bg-warning",
+  "broker.confirmed": "bg-success",
+  "trade.opened": "bg-info",
+  "trade.closed": "bg-success",
 };
 
 const STEP_DOT_COLORS: Record<string, string> = {
-  "market.classified": "border-blue-500 bg-blue-500",
-  "strategy.selected": "border-purple-500 bg-purple-500",
-  "score.calculated": "border-amber-500 bg-amber-500",
-  "filters.approved": "border-emerald-500 bg-emerald-500",
-  "decision.made": "border-cyan-500 bg-cyan-500",
-  "order.sent": "border-orange-500 bg-orange-500",
-  "broker.confirmed": "border-green-500 bg-green-500",
-  "trade.opened": "border-blue-400 bg-blue-400",
-  "trade.closed": "border-emerald-400 bg-emerald-400",
+  "market.classified": "border-info bg-info",
+  "strategy.selected": "border-primary bg-primary",
+  "score.calculated": "border-warning bg-warning",
+  "filters.approved": "border-success bg-success",
+  "decision.made": "border-info bg-info",
+  "order.sent": "border-warning bg-warning",
+  "broker.confirmed": "border-success bg-success",
+  "trade.opened": "border-info bg-info",
+  "trade.closed": "border-success bg-success",
 };
 
 function formatTime(ts: number): string {
@@ -75,7 +75,7 @@ function buildNarrative(ctx: ReplayContext): string {
 
 function ScoreBar({ score, label }: { score: number; label?: string }) {
   const pct = Math.min(100, Math.max(0, score));
-  const color = pct >= 85 ? "bg-success" : pct >= 70 ? "bg-success/80" : pct >= 60 ? "bg-warning" : pct >= 40 ? "bg-orange-500" : "bg-danger";
+  const color = pct >= 85 ? "bg-success" : pct >= 70 ? "bg-success/80" : pct >= 60 ? "bg-warning" : pct >= 40 ? "bg-warning" : "bg-danger";
   return (
     <div>
       <div className="flex items-center justify-between mb-1">

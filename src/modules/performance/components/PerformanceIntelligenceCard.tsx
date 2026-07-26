@@ -27,10 +27,10 @@ function MetricBadge({
 function WinRateBar({ winRate }: { winRate: number }) {
   const color =
     winRate >= 60
-      ? "bg-emerald-500"
+      ? "bg-success"
       : winRate >= 50
-        ? "bg-amber-500"
-        : "bg-red-500";
+        ? "bg-warning"
+        : "bg-danger";
   return (
     <div className="w-full h-2 rounded-full bg-secondary overflow-hidden">
       <div
@@ -64,34 +64,34 @@ export function PerformanceIntelligenceCard({
         <MetricBadge
           label="Win Rate"
           value={`${data.winRate}%`}
-          color={data.winRate >= 50 ? "text-emerald-400" : "text-red-400"}
+          color={data.winRate >= 50 ? "text-success" : "text-danger"}
         />
         <MetricBadge
           label="Profit Factor"
           value={`${data.profitFactor}x`}
           color={
             data.profitFactor >= 1.5
-              ? "text-emerald-400"
+              ? "text-success"
               : data.profitFactor >= 1
-                ? "text-amber-400"
-                : "text-red-400"
+                ? "text-warning"
+                : "text-danger"
           }
         />
         <MetricBadge
           label="ROI"
           value={`${data.roi}%`}
-          color={data.roi >= 0 ? "text-emerald-400" : "text-red-400"}
+          color={data.roi >= 0 ? "text-success" : "text-danger"}
         />
         <MetricBadge
           label="Expectancy"
           value={fmt(data.expectancy)}
-          color={data.expectancy >= 0 ? "text-emerald-400" : "text-red-400"}
+          color={data.expectancy >= 0 ? "text-success" : "text-danger"}
         />
         <MetricBadge label="Total Trades" value={data.totalTrades} />
         <MetricBadge
           label="Lucro Líquido"
           value={fmt(data.netProfit)}
-          color={data.netProfit >= 0 ? "text-emerald-400" : "text-red-400"}
+          color={data.netProfit >= 0 ? "text-success" : "text-danger"}
         />
         <MetricBadge label="Score Médio" value={data.averageScore} />
         <MetricBadge

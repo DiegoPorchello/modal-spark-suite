@@ -164,12 +164,14 @@ export class PumaBrokerAdapter implements IBroker {
   private _pendingTradeResults = new Map<
     string,
     {
-      resolve: (status: OrderStatus) => void;
+      resolve: (status: OrderStatus, profit?: number) => void;
       timer: ReturnType<typeof setTimeout>;
     }
   >();
   private _pendingResultPoller: ReturnType<typeof setInterval> | null = null;
   private _expiresAtMap = new Map<string, string>();
+  private _traceIdMap = new Map<string, string>();
+  private _pendingCopyTrades = new Map<string, { traceId: string; account: string; startedAt: number }>();
 
   // Binance WebSocket para dados de mercado (candles gratuitos, sem auth)
   private _binanceWs: BinanceWsClient;
@@ -1066,6 +1068,7 @@ export class PumaBrokerAdapter implements IBroker {
 
     const payout = await this.getPayout(params.asset);
     const timeframe = params.timeframe ?? "M1";
+    const duration = params.expiration;
 
     const payload = {
       asset: params.asset,
@@ -1076,18 +1079,22 @@ export class PumaBrokerAdapter implements IBroker {
       payout,
       timeframe,
       isDemo: this._isDemo,
+      traceId: params.traceId ?? "",
+      signalCandleTime: params.signalCandleTime ?? 0,
+      signalCandleOpen: params.signalCandleOpen ?? 0,
+      signalCandleClose: params.signalCandleClose ?? 0,
+      candleId: params.candleId ?? "",
+      durationReceived: params.durationReceived ?? params.expiration,
     };
 
-    const traceId = params.decidedAt ?? Date.now();
-    engineLogger.info("PumaBroker", "[AMOUNT TRACE] orderParams → payload", {
-      traceId,
-      amount: params.amount,
-      direction,
-      asset: params.asset,
-    });
-    console.log("[BROKER]", JSON.stringify({ ...payload, traceId }));
+    console.log("[BROKER]", JSON.stringify(payload));
+    console.log(
+      `[TIMING] BROKER_TRACE traceId=${params.traceId ?? "none"} asset=${params.asset} direction=${direction} duration=${duration} durationReceived=${params.durationReceived ?? duration} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+    );
 
     let res: Response;
+    const t0 = performance.now();
+    console.log(`[AUDIT] [HTTP_REQUEST] local=${new Date().toISOString()} asset=${params.asset} direction=${direction} perf=${t0}`);
     try {
       res = await fetchWithRetry(`${DAEMON_URL}/trades`, {
         method: "POST",
@@ -1111,9 +1118,26 @@ export class PumaBrokerAdapter implements IBroker {
     }
 
     const data: TradeResponse = await res.json();
+    const t1 = performance.now();
+    console.log(`[AUDIT] [HTTP_RESPONSE] asset=${params.asset} orderId=${data.id} perf=${t1} duration=${(t1 - t0).toFixed(2)}ms`);
+
+    if (params.traceId && data.id) {
+      this._traceIdMap.set(data.id, params.traceId);
+    }
+
     if (data.expiresAt) {
       this._expiresAtMap.set(data.id, data.expiresAt);
     }
+    
+    console.log(`[AUDIT] [ORDER_CREATED] asset=${params.asset} orderId=${data.id}`);
+    if (data.status === "ACTIVE") {
+      console.log(`[AUDIT] [TRADE_ACTIVE] asset=${params.asset} orderId=${data.id}`);
+    }
+
+    console.log(
+      `[TIMING] BROKER_HTTP_COMPLETE traceId=${params.traceId ?? "none"} orderId=${data.id} httpMs=${(t1 - t0).toFixed(2)} status=${data.status} expiresAt=${data.expiresAt ?? "none"} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+    );
+
     return {
       orderId: data.id,
       status: data.status === "ACTIVE" ? "accepted" : "rejected",
@@ -1121,7 +1145,7 @@ export class PumaBrokerAdapter implements IBroker {
     };
   }
 
-  async getResult(orderId: string): Promise<OrderStatus> {
+  async getResult(orderId: string): Promise<{ status: OrderStatus; profit: number }> {
     if (!this._token) throw new Error("Não autenticado");
 
     let res: Response;
@@ -1138,25 +1162,25 @@ export class PumaBrokerAdapter implements IBroker {
     // Daemon retorna 404 quando a trade não existe no SQLite (nunca foi criada ou já foi removida)
     if (res.status === 404) {
       console.warn(`[POLL] Trade não encontrada (404): ${orderId}`);
-      return "UNKNOWN";
+      return { status: "UNKNOWN", profit: 0 };
     }
 
     if (!res.ok) {
       console.log(
         `[DEBUG-TRADE] ⏱ getResult: HTTP ${res.status} para ordem ${orderId} — continuando polling (ACTIVE)`,
       );
-      return "ACTIVE";
+      return { status: "ACTIVE", profit: 0 };
     }
 
     const data = await res.json();
     if (!data) {
       console.warn(`[POLL] Resposta vazia para: ${orderId}`);
-      return "ACTIVE";
+      return { status: "ACTIVE", profit: 0 };
     }
-    return this._normalizeStatus(data.status ?? "ACTIVE");
+    return { status: this._normalizeStatus(data.status ?? "ACTIVE"), profit: Number(data.profit ?? 0) };
   }
 
-  waitForTradeResult(orderId: string, timeoutMs = 30000): Promise<OrderStatus> {
+  waitForTradeResult(orderId: string, timeoutMs = 30000): Promise<{ status: OrderStatus; profit: number }> {
     const expiresAt = this._expiresAtMap.get(orderId);
     const firstDelay = expiresAt
       ? Math.min(timeoutMs, Math.max(0, new Date(expiresAt).getTime() - Date.now() + 2000))
@@ -1166,12 +1190,12 @@ export class PumaBrokerAdapter implements IBroker {
       `[DEBUG-TRADE] ⏱ waitForTradeResult: orderId=${orderId}, timeoutMs=${timeoutMs}, expiresAt=${expiresAt}, firstDelay=${firstDelay}ms, now=${Date.now()}`,
     );
 
-    return new Promise<OrderStatus>((resolve) => {
+    return new Promise<{ status: OrderStatus; profit: number }>((resolve) => {
       const startTimer = setTimeout(async () => {
-        await this._expiryFastRetryLoop(orderId, resolve);
+        await this._expiryFastRetryLoop(orderId, (s, p) => resolve({ status: s, profit: p ?? 0 }));
       }, firstDelay);
 
-      this._pendingTradeResults.set(orderId, { resolve, timer: startTimer });
+      this._pendingTradeResults.set(orderId, { resolve: (s, p) => resolve({ status: s, profit: p ?? 0 }), timer: startTimer });
       console.log(
         `[DEBUG-TRADE] ⏱ PENDING REGISTERED: orderId=${orderId}, pendingCount=${this._pendingTradeResults.size}`,
       );
@@ -1181,7 +1205,7 @@ export class PumaBrokerAdapter implements IBroker {
 
   private async _expiryFastRetryLoop(
     orderId: string,
-    resolve: (status: OrderStatus) => void,
+    resolve: (status: OrderStatus, profit?: number) => void,
   ): Promise<void> {
     const maxRetries = 5;
     const retryInterval = 2500;
@@ -1190,15 +1214,15 @@ export class PumaBrokerAdapter implements IBroker {
       if (!this._pendingTradeResults.has(orderId)) return; // resolved by Socket.IO
 
       try {
-        const status = await this.getResult(orderId);
+        const { status, profit } = await this.getResult(orderId);
         if (status !== "ACTIVE") {
           console.log(
-            `[DEBUG-TRADE] ⏱ EXPIRY POLL RESOLVED: orderId=${orderId}, status=${status}, attempt=${attempt}`,
+            `[DEBUG-TRADE] ⏱ EXPIRY POLL RESOLVED: orderId=${orderId}, status=${status}, profit=${profit}, attempt=${attempt}`,
           );
           this._expiresAtMap.delete(orderId);
           this._pendingTradeResults.delete(orderId);
           if (this._pendingTradeResults.size === 0) this._stopPendingResultPoller();
-          resolve(status);
+          resolve(status, profit);
           return;
         }
       } catch (err) {
@@ -1227,15 +1251,15 @@ export class PumaBrokerAdapter implements IBroker {
       }
       for (const [orderId, pending] of this._pendingTradeResults) {
         try {
-          const status = await this.getResult(orderId);
+          const { status, profit } = await this.getResult(orderId);
           if (status !== "ACTIVE") {
             console.log(
-              `[DEBUG-TRADE] ⏱ REST POLLER RESOLVED: orderId=${orderId}, status=${status}`,
+              `[DEBUG-TRADE] ⏱ REST POLLER RESOLVED: orderId=${orderId}, status=${status}, profit=${profit}`,
             );
             clearTimeout(pending.timer);
             this._expiresAtMap.delete(orderId);
             this._pendingTradeResults.delete(orderId);
-            pending.resolve(status);
+            pending.resolve(status, profit);
           }
         } catch (err) {
           console.log(`[DEBUG-TRADE] ⏱ REST POLLER FAILED: orderId=${orderId}, error=${err}`);
@@ -1257,6 +1281,10 @@ export class PumaBrokerAdapter implements IBroker {
 
   handleTradeUpdate(data: { id: string; status?: string; trade?: { status: string }; result?: string }): void {
     const status = data.trade?.status ?? data.result ?? data.status ?? "";
+    const traceId = this._traceIdMap.get(data.id) ?? "unknown";
+    console.log(
+      `[TIMING] TRADE_UPDATE traceId=${traceId} tradeId=${data.id} status=${status} now=${Date.now()} tsPerf=${performance.now().toFixed(2)}`,
+    );
     console.log(
       `[DEBUG-TRADE] 📊 handleTradeUpdate RECEIVED: id=${data.id}, status=${status}, rawStatus=${data.status}, tradeStatus=${data.trade?.status}, result=${data.result}, now=${Date.now()}`,
     );
@@ -1271,7 +1299,7 @@ export class PumaBrokerAdapter implements IBroker {
       if (this._pendingTradeResults.size === 0) this._stopPendingResultPoller();
       const normalized = this._normalizeStatus(status);
       console.log(`[DEBUG-TRADE] 📊 handleTradeUpdate: normalized ${status} -> ${normalized}`);
-      pending.resolve(normalized);
+      pending.resolve(normalized, 0);
     } else {
       console.log(
         `[DEBUG-TRADE] ⚠️ handleTradeUpdate: NO PENDING for ${data.id} — trade not tracked by this adapter (maybe placed externally?)`,
@@ -1281,11 +1309,16 @@ export class PumaBrokerAdapter implements IBroker {
 
   handleTradeResult(data: { id: string; status?: string; profit: number; trade?: { status: string }; result?: string }): void {
     const status = data.trade?.status ?? data.result ?? data.status ?? "";
+    const traceId = this._traceIdMap.get(data.id) ?? "unknown";
     console.log("[TRADE RESULT RECEBIDO]", {
+      traceId,
       tradeId: data.id,
       rawStatus: status,
       profit: data.profit,
     });
+    console.log(
+      `[TIMING] TRADE_RESULT traceId=${traceId} tradeId=${data.id} status=${status} profit=${data.profit} now=${Date.now()} tsPerf=${performance.now().toFixed(2)}`,
+    );
     console.log(
       `[DEBUG-TRADE] 🏁 handleTradeResult RECEIVED: id=${data.id}, status=${status}, rawStatus=${data.status}, tradeStatus=${data.trade?.status}, result=${data.result}, profit=${data.profit}`,
     );
@@ -1299,12 +1332,13 @@ export class PumaBrokerAdapter implements IBroker {
       this._expiresAtMap.delete(data.id);
       this._pendingTradeResults.delete(data.id);
       if (this._pendingTradeResults.size === 0) this._stopPendingResultPoller();
-      pending.resolve(normalized);
+      pending.resolve(normalized, data.profit);
     } else {
       console.log(
         `[DEBUG-TRADE] ⚠️ handleTradeResult: NO PENDING for ${data.id} — resolving anyway`,
       );
     }
+    this._traceIdMap.delete(data.id);
     console.log(
       `[DEBUG-TRADE] 🏁 handleTradeResult: final status ${status} -> ${normalized}, profit: ${data.profit}`,
     );

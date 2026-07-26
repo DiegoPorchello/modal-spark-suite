@@ -1,6 +1,6 @@
 /**
  * market/candle-buffer.ts
- * Buffer circular de candles — mantém mínimo de 70 candles por ativo.
+ * Buffer circular de candles — mantém mínimo configurável de candles por ativo.
  *
  * Estados do buffer:
  *   INITIALIZING      → Buffer vazio, aguardando primeiro candle
@@ -11,7 +11,7 @@
  * Regras:
  *   - Apenas candles fechados são armazenados
  *   - Buffer circular com tamanho máximo configurável
- *   - Mínimo de 70 candles para Decision Engine
+ *   - Mínimo configurável para Decision Engine (default 70, hybrid 200)
  *   - Detecta candle em formação vs fechado
  *   - Duplicados são substituídos (time duplicado)
  *   - Ao entrar em LIVE, buffer é ordenado e validado
@@ -76,9 +76,13 @@ export class CandleBuffer {
         para: state,
         totalCandles: candles.length,
         primeiro: candles.length > 0 ? new Date(candles[0].time).toISOString() : "N/A",
-        ultimo: candles.length > 0 ? new Date(candles[candles.length - 1].time).toISOString() : "N/A",
+        ultimo:
+          candles.length > 0 ? new Date(candles[candles.length - 1].time).toISOString() : "N/A",
         minRequired: this._minRequired,
       },
+    );
+    console.log(
+      `[CANDLE BUFFER DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ STATE TRANSITION ${s} ${prev ?? "INITIALIZING"} → ${state} ═══ count=${candles.length} first=${candles.length > 0 ? new Date(candles[0].time).toISOString() : "N/A"} last=${candles.length > 0 ? new Date(candles[candles.length - 1].time).toISOString() : "N/A"}`,
     );
   }
 
@@ -92,7 +96,8 @@ export class CandleBuffer {
       state: this.getState(symbol),
       totalCandles: candles.length,
       firstTime: candles.length > 0 ? new Date(candles[0].time).toISOString() : "N/A",
-      lastTime: candles.length > 0 ? new Date(candles[candles.length - 1].time).toISOString() : "N/A",
+      lastTime:
+        candles.length > 0 ? new Date(candles[candles.length - 1].time).toISOString() : "N/A",
       candleCount: candles.length,
       minRequired: this._minRequired,
     };
@@ -169,7 +174,12 @@ export class CandleBuffer {
         engineLogger.info(
           "CandleBuffer",
           `📥 PRIMEIRO CANDLE ${upperSymbol} time=${new Date(candle.time).toISOString()} close=${candle.close} origin=${origin}`,
-          { symbol: upperSymbol, time: new Date(candle.time).toISOString(), close: candle.close, origin },
+          {
+            symbol: upperSymbol,
+            time: new Date(candle.time).toISOString(),
+            close: candle.close,
+            origin,
+          },
         );
       }
       candles.push(candle);
@@ -191,6 +201,9 @@ export class CandleBuffer {
             volume: lastBar.volume,
           },
         );
+        console.log(
+          `[TIMING] BUFFER_CANDLE_CLOSED symbol=${upperSymbol} time=${lastBar.time} open=${lastBar.open} close=${lastBar.close} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
+        );
         return "closed";
       }
       return "added";
@@ -203,11 +216,7 @@ export class CandleBuffer {
       const stateInfo = this.getStateInfo(upperSymbol);
       engineLogger.warn(
         "CandleBuffer",
-        `⛔ VIOLAÇÃO CRONOLÓGICA [LIVE] — IGNORADO ${upperSymbol}
-         candle=${new Date(candle.time).toISOString()} close=${candle.close} origin=${origin}
-         buffer=state=${state} count=${candles.length}/${this._minRequired}
-         first=${stateInfo.firstTime} last=${stateInfo.lastTime}
-         motivo=time (${candle.time}) < lastTime (${lastBar?.time ?? 0})`,
+        `⛔ VIOLAÇÃO CRONOLÓGICA [LIVE] — IGNORADO ${upperSymbol} origin=${origin} candle=${new Date(candle.time).toISOString()} last=${stateInfo.lastTime}`,
         {
           symbol: upperSymbol,
           state,
@@ -219,7 +228,6 @@ export class CandleBuffer {
           lastTime: stateInfo.lastTime,
           diffMs: (lastBar?.time ?? 0) - candle.time,
           minRequired: this._minRequired,
-          motivo: `time < lastTime (${lastBar?.time ?? 0})`,
         },
       );
       return "rejected";
@@ -234,7 +242,7 @@ export class CandleBuffer {
         "CandleBuffer",
         `📥 GAP-FILL (append) ${upperSymbol} [${candles.length}/${this._minRequired}]
          time=${new Date(candle.time).toISOString()} close=${candle.close} origin=${origin}
-         após lastTime=${new Date((lastBar?.time ?? 0)).toISOString()}`,
+         após lastTime=${new Date(lastBar?.time ?? 0).toISOString()}`,
         {
           symbol: upperSymbol,
           acao: "append",
@@ -243,7 +251,7 @@ export class CandleBuffer {
           candleTime: new Date(candle.time).toISOString(),
           candleClose: candle.close,
           origin,
-          lastTime: new Date((lastBar?.time ?? 0)).toISOString(),
+          lastTime: new Date(lastBar?.time ?? 0).toISOString(),
           firstTime: firstBar ? new Date(firstBar.time).toISOString() : "N/A",
         },
       );
@@ -263,10 +271,14 @@ export class CandleBuffer {
           candleClose: candle.close,
           origin,
           posicao: insertIdx,
-          anterior: candles[insertIdx - 1] ? new Date(candles[insertIdx - 1].time).toISOString() : "N/A",
-          proximo: candles[insertIdx + 1] ? new Date(candles[insertIdx + 1].time).toISOString() : "N/A",
+          anterior: candles[insertIdx - 1]
+            ? new Date(candles[insertIdx - 1].time).toISOString()
+            : "N/A",
+          proximo: candles[insertIdx + 1]
+            ? new Date(candles[insertIdx + 1].time).toISOString()
+            : "N/A",
           firstTime: firstBar ? new Date(firstBar.time).toISOString() : "N/A",
-          lastTime: new Date((lastBar?.time ?? 0)).toISOString(),
+          lastTime: new Date(lastBar?.time ?? 0).toISOString(),
         },
       );
     }
@@ -291,7 +303,9 @@ export class CandleBuffer {
     const candles = this._buffer.get(s);
 
     if (!candles || candles.length === 0) {
-      engineLogger.warn("CandleBuffer", `markAsLive ignorado: buffer vazio para ${s}`, { symbol: s });
+      engineLogger.warn("CandleBuffer", `markAsLive ignorado: buffer vazio para ${s}`, {
+        symbol: s,
+      });
       return;
     }
 

@@ -53,7 +53,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             return (
               <tr
                 key={i}
-                className={isBullish ? "text-green-400" : "text-red-400"}
+                className={isBullish ? "text-success" : "text-danger"}
               >
                 <td className="p-1 text-left text-muted-foreground">
                   {candle.time}

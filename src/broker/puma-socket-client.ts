@@ -517,6 +517,7 @@ export class PumaSocketClient {
 
   private _handleTradeUpdate(data: Record<string, unknown>): void {
     if (!data) return;
+    const t0 = performance.now();
 
     const tradeId = String(data.id ?? "");
     // Extrai status de trade.status, ou status (ordem de prioridade conforme payload real da Puma)
@@ -529,6 +530,7 @@ export class PumaSocketClient {
     console.log("║  status:", status.padEnd(52), "║");
     console.log("║  symbol:", String(data.symbol ?? "").padEnd(52), "║");
     console.log("╚═══════════════════════════════════════════════════════════════╝");
+    console.log(`[AUDIT] [WS_TRADE_UPDATE] tradeId=${tradeId} status=${status} perf=${t0}`);
     console.log("[DEBUG-TRADE] 📊 tradeUpdate RAW payload:", JSON.stringify(data, null, 2));
     console.log("[DEBUG-TRADE] 📊 tradeUpdate parsed:", { tradeId, status, symbol: data.symbol, tradeStatus: tradeObj?.status });
 
@@ -552,6 +554,7 @@ export class PumaSocketClient {
 
   private _handleTradeResult(data: Record<string, unknown>): void {
     if (!data) return;
+    const t0 = performance.now();
 
     const tradeId = String(data.id ?? data.tradeId ?? data.orderId ?? "");
     // Extrai status de trade.status, result, ou status (ordem de prioridade conforme payload real da Puma)
@@ -567,6 +570,7 @@ export class PumaSocketClient {
     console.log("║  status:", status.padEnd(52), "║");
     console.log("║  profit:", profit.toFixed(2).padEnd(52), "║");
     console.log("╚═══════════════════════════════════════════════════════════════╝");
+    console.log(`[AUDIT] [WS_TRADE_RESULT] tradeId=${tradeId} status=${status} perf=${t0}`);
 
     engineLogger.info("PumaSocketClient", "🏁 Trade result recebido", {
       tradeId,

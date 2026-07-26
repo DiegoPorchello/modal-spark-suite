@@ -1,0 +1,6 @@
+export enum OperationProfile {
+  AUTO = "AUTO",
+  FOREX = "FOREX",
+  HYBRID_FLOW = "HYBRID_FLOW",
+  HYBRID_PROBABILITY = "HYBRID_PROBABILITY"
+}

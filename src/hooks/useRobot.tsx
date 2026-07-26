@@ -77,6 +77,8 @@ export function RobotProvider({ children }: { children: ReactNode }) {
     if (adapter && !engineRef.current) {
       engineRef.current = new FlowRobotEngine(adapter);
       setEngine(engineRef.current);
+      const ts = new Date().toLocaleTimeString("pt-BR");
+      console.log(`[useRobot] ${ts} 🏗️ Engine criado — config.asset: ${engineRef.current.state.config.asset}, marketMode: ${engineRef.current.state.config.marketMode}`);
       setState(engineRef.current.state);
 
       // Listening for the "operation-opened" event from the engine
@@ -104,6 +106,9 @@ export function RobotProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!engine) return;
     const unsub = engine.on((event: RobotEvent) => {
+      const ts = new Date().toLocaleTimeString("pt-BR");
+      const cfg = event.state.config;
+      console.log(`[useRobot] ${ts} 🔧 State update — asset: ${cfg?.asset}, marketMode: ${cfg?.marketMode}`);
       setState({ ...event.state, operations: [...event.state.operations] });
     });
     return () => {

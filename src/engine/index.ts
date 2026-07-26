@@ -23,7 +23,6 @@ export type { EngineSignal, EngineConfig } from "./types";
 export { DEFAULT_ENGINE_CONFIG } from "./types";
 export { Logger, engineLogger } from "./logger";
 export type { LogEntry, LogLevel } from "./logger";
-export { FlowContinuityEngine } from "./flow-continuity-engine";
 export { CandleContinuityEngine } from "./candle-continuity-engine";
 export type {
   CandleContinuityResult,

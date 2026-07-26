@@ -104,19 +104,19 @@ export function computeRobotHealthScore(params: {
   let color: string;
   if (total >= 80) {
     label = "EXCELENTE";
-    color = "text-emerald-400";
+    color = "text-success";
   } else if (total >= 60) {
     label = "BOM";
-    color = "text-green-400";
+    color = "text-success";
   } else if (total >= 40) {
     label = "REGULAR";
-    color = "text-amber-400";
+    color = "text-warning";
   } else if (total >= 20) {
     label = "RUIM";
-    color = "text-orange-400";
+    color = "text-warning";
   } else {
     label = "CRÍTICO";
-    color = "text-red-400";
+    color = "text-danger";
   }
 
   return {

@@ -6,9 +6,9 @@ const TYPE_CONFIG: Record<
   AdvisorFeedEntry["type"],
   { icon: typeof Target; color: string; bg: string; label: string }
 > = {
-  recommendation: { icon: Target, color: "text-blue-400", bg: "bg-blue-400/10", label: "Recomendação" },
-  alert: { icon: AlertTriangle, color: "text-amber-400", bg: "bg-amber-400/10", label: "Alerta" },
-  opportunity: { icon: Lightbulb, color: "text-emerald-400", bg: "bg-emerald-400/10", label: "Oportunidade" },
+  recommendation: { icon: Target, color: "text-info", bg: "bg-info/10", label: "Recomendação" },
+  alert: { icon: AlertTriangle, color: "text-warning", bg: "bg-warning/10", label: "Alerta" },
+  opportunity: { icon: Lightbulb, color: "text-success", bg: "bg-success/10", label: "Oportunidade" },
 };
 
 function formatTime(ts: number): string {

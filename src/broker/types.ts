@@ -28,7 +28,7 @@ export interface IBroker {
 
   buyCall(params: OrderParams): Promise<OrderResult>;
   buyPut(params: OrderParams): Promise<OrderResult>;
-  getResult(orderId: string): Promise<OrderStatus>;
+  getResult(orderId: string): Promise<{ status: OrderStatus; profit: number }>;
 
   subscribePrices(assets: string[], onPrice: (price: MarketPrice) => void): () => void;
   getBalance(): Promise<AccountBalance>;
@@ -51,6 +51,12 @@ export interface OrderParams {
   entryPrice?: number;
   timeframe: string;
   decidedAt?: number;
+  traceId?: string;
+  signalCandleTime?: number;
+  signalCandleOpen?: number;
+  signalCandleClose?: number;
+  candleId?: string;
+  durationReceived?: number;
 }
 
 export interface OrderResult {

@@ -99,7 +99,7 @@ export class Executor {
     }
 
     try {
-      const brokerStatus = await this.broker.getResult(orderId);
+      const { status: brokerStatus, profit: brokerProfit } = await this.broker.getResult(orderId);
 
       if (brokerStatus === "ACTIVE") {
         return null;
@@ -108,7 +108,8 @@ export class Executor {
       const payout = await this.broker.getPayout(active.params.asset);
       const isWin = brokerStatus === "WIN";
       const isLoss = brokerStatus === "LOSS";
-      const profit = isWin ? active.params.amount * payout : isLoss ? -active.params.amount : 0;
+      const isDraw = brokerStatus === "DRAW" || (isLoss && brokerProfit === 0);
+      const profit = isWin ? active.params.amount * payout : isLoss && !isDraw ? -active.params.amount : 0;
 
       const report: ExecutionReport = {
         orderId,
@@ -116,7 +117,7 @@ export class Executor {
         direction: active.params.direction,
         amount: active.params.amount,
         entryPrice: active.params.entryPrice,
-        result: isWin ? "WIN" : isLoss ? "LOSS" : "DRAW",
+        result: isWin ? "WIN" : isDraw ? "DRAW" : isLoss ? "LOSS" : "DRAW",
         profit,
         payout,
         score: active.params.score,

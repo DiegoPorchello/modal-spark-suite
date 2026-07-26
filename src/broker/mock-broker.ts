@@ -72,8 +72,9 @@ export class MockBroker implements IBroker {
     return this._placeOrder(params, "PUT");
   }
 
-  async getResult(orderId: string): Promise<OrderStatus> {
-    return this._orders.get(orderId)?.result ?? "ACTIVE";
+  async getResult(orderId: string): Promise<{ status: OrderStatus; profit: number }> {
+    const order = this._orders.get(orderId);
+    return { status: order?.result ?? "ACTIVE", profit: 0 };
   }
 
   subscribePrices(assets: string[], onPrice: (price: MarketPrice) => void): () => void {

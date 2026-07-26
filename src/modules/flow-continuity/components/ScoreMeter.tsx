@@ -32,19 +32,19 @@ export const ScoreMeter: React.FC<ScoreMeterProps> = ({
   };
 
   const getColorClass = (score: number): string => {
-    if (score >= 90) return "bg-green-500/20 border-green-500/40 text-green-400";
-    if (score >= 80) return "bg-emerald-500/20 border-emerald-500/40 text-emerald-400";
-    if (score >= 70) return "bg-yellow-500/20 border-yellow-500/40 text-yellow-400";
-    if (score >= 60) return "bg-orange-500/20 border-orange-500/40 text-orange-400";
-    return "bg-red-500/20 border-red-500/40 text-red-400";
+    if (score >= 90) return "bg-success/20 border-success/40 text-success";
+    if (score >= 80) return "bg-success/20 border-success/40 text-success";
+    if (score >= 70) return "bg-warning/20 border-warning/40 text-warning";
+    if (score >= 60) return "bg-warning/20 border-warning/40 text-warning";
+    return "bg-danger/20 border-danger/40 text-danger";
   };
 
   const getBorderColorClass = (score: number): string => {
-    if (score >= 90) return "stroke-green-500";
-    if (score >= 80) return "stroke-emerald-500";
-    if (score >= 70) return "stroke-yellow-500";
-    if (score >= 60) return "stroke-orange-500";
-    return "stroke-red-500";
+    if (score >= 90) return "stroke-success";
+    if (score >= 80) return "stroke-success";
+    if (score >= 70) return "stroke-warning";
+    if (score >= 60) return "stroke-warning";
+    return "stroke-danger";
   };
 
   const radius = sizeClasses[size].container.includes("w-64") ? 32 : sizeClasses[size].container.includes("w-48") ? 24 : 16;

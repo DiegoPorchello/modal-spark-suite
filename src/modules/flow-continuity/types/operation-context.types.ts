@@ -94,4 +94,19 @@ export interface OperationContext {
 
   /** Whether this was a recovery trade */
   isRecovery: boolean;
+
+  /** Trace ID for correlation across the full flow */
+  traceId: string;
+
+  /** Signal candle time (when the analysis was performed) */
+  signalCandleTime: number;
+
+  /** Expected entry candle (signalCandleTime + 60000) */
+  expectedEntryCandle: number;
+
+  /** Actual entry time (when the order was sent) */
+  actualEntryTime: number;
+
+  /** Candle ID for correlation */
+  candleId: string;
 }

@@ -270,7 +270,7 @@ export class SmartRecoveryEngine implements IRecoveryEngine {
   private getHealthInfo(health: number): { label: string; color: string } {
     if (health >= 80) return { label: "Confortável", color: "text-success" };
     if (health >= 60) return { label: "Atenção", color: "text-warning" };
-    if (health >= 30) return { label: "Crítico", color: "text-orange-500" };
+    if (health >= 30) return { label: "Crítico", color: "text-warning" };
     return { label: "Limite atingido", color: "text-danger" };
   }
 

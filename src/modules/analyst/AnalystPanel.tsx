@@ -91,8 +91,8 @@ function getScoreBandInfo(score: number): {
   if (score >= 40)
     return {
       label: "Mercado Fraco",
-      color: "text-orange-500",
-      barColor: "bg-orange-500",
+      color: "text-warning",
+      barColor: "bg-warning",
       band: "FRACO",
     };
   return { label: "Não Operar", color: "text-danger", barColor: "bg-danger", band: "NAO_OPERAR" };
@@ -376,7 +376,7 @@ function MarketPanel({
         <span className="text-[9px] tracking-widest text-muted-foreground">MERCADO</span>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <InfoBox label="Ativo" value={robotState?.config.asset || market.asset} />
+        <InfoBox label="Ativo" value={market.asset} />
         <InfoBox
           label="Timeframes"
           value={robotState?.config.timeframes?.join(", ") || market.timeframe || "M1"}
@@ -767,7 +767,7 @@ function ScanLogPanel({ scanLog }: { scanLog: ScanLogEntry[] }) {
               : entry.score >= 60
                 ? "text-warning"
                 : entry.score > 0
-                  ? "text-orange-500"
+                  ? "text-warning"
                   : "text-muted-foreground";
 
           const statusBg = entry.blocked
@@ -777,7 +777,7 @@ function ScanLogPanel({ scanLog }: { scanLog: ScanLogEntry[] }) {
               : "bg-success/5 border-success/10";
 
           return (
-            <div key={`${entry.asset}-${i}`} className={`p-1.5 rounded border ${statusBg}`}>
+            <div key={entry.traceId} className={`p-1.5 rounded border ${statusBg}`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   {trendIcon}
@@ -857,20 +857,20 @@ function MiniInfo({ label, value }: { label: string; value: string }) {
 
 function DecisionContextPanelInline({ context }: { context: import("../flow-continuity/types/decision-context.types").DecisionContext }) {
   const DECISION_COLORS: Record<string, string> = {
-    CALL: "text-emerald-400",
-    PUT: "text-red-400",
-    WAIT: "text-amber-400",
-    REJECT: "text-zinc-400",
+    CALL: "text-success",
+    PUT: "text-danger",
+    WAIT: "text-warning",
+    REJECT: "text-muted-foreground",
   };
   const DECISION_BG: Record<string, string> = {
-    CALL: "bg-emerald-500/10",
-    PUT: "bg-red-500/10",
-    WAIT: "bg-amber-500/10",
+    CALL: "bg-success/10",
+    PUT: "bg-danger/10",
+    WAIT: "bg-warning/10",
     REJECT: "bg-zinc-500/10",
   };
   const confPct = Math.round(context.confidence * 100);
   const confLabel = confPct >= 80 ? "High" : confPct >= 50 ? "Medium" : "Low";
-  const confColor = confPct >= 80 ? "text-emerald-400" : confPct >= 50 ? "text-amber-400" : "text-zinc-400";
+  const confColor = confPct >= 80 ? "text-success" : confPct >= 50 ? "text-warning" : "text-muted-foreground";
 
   return (
     <div className="px-4 py-3 border-b border-border">
@@ -901,21 +901,21 @@ function DecisionContextPanelInline({ context }: { context: import("../flow-cont
         </div>
       </div>
       {context.approvedFilters.length > 0 && (
-        <div className="bg-emerald-500/5 rounded p-1.5 mb-1">
-          <div className="text-[9px] text-emerald-400 font-semibold mb-0.5">APPROVED ({context.approvedFilters.length})</div>
+        <div className="bg-success/5 rounded p-1.5 mb-1">
+          <div className="text-[9px] text-success font-semibold mb-0.5">APPROVED ({context.approvedFilters.length})</div>
           {context.approvedFilters.map((f) => (
             <div key={f.id} className="text-[9px] text-foreground/70">
-              {f.name}: <span className="text-emerald-400">{f.contribution}/{f.weight}</span>
+              {f.name}: <span className="text-success">{f.contribution}/{f.weight}</span>
             </div>
           ))}
         </div>
       )}
       {context.rejectedFilters.length > 0 && (
-        <div className="bg-red-500/5 rounded p-1.5 mb-1">
-          <div className="text-[9px] text-red-400 font-semibold mb-0.5">REJECTED ({context.rejectedFilters.length})</div>
+        <div className="bg-danger/5 rounded p-1.5 mb-1">
+          <div className="text-[9px] text-danger font-semibold mb-0.5">REJECTED ({context.rejectedFilters.length})</div>
           {context.rejectedFilters.map((f) => (
             <div key={f.id} className="text-[9px] text-foreground/70">
-              {f.name}: <span className="text-red-400">{f.contribution}/{f.weight}</span>
+              {f.name}: <span className="text-danger">{f.contribution}/{f.weight}</span>
             </div>
           ))}
         </div>
@@ -930,22 +930,22 @@ function DecisionContextPanelInline({ context }: { context: import("../flow-cont
 
 function OperationContextPanelInline({ context }: { context: import("../flow-continuity/types/operation-context.types").OperationContext }) {
   const STATUS_COLORS: Record<string, string> = {
-    WIN: "text-emerald-400",
-    LOSS: "text-red-400",
-    DRAW: "text-amber-400",
-    CANCELLED: "text-zinc-400",
-    PENDING: "text-blue-400",
-    OPEN: "text-blue-400",
+    WIN: "text-success",
+    LOSS: "text-danger",
+    DRAW: "text-warning",
+    CANCELLED: "text-muted-foreground",
+    PENDING: "text-info",
+    OPEN: "text-info",
   };
   const STATUS_BG: Record<string, string> = {
-    WIN: "bg-emerald-500/10",
-    LOSS: "bg-red-500/10",
-    DRAW: "bg-amber-500/10",
+    WIN: "bg-success/10",
+    LOSS: "bg-danger/10",
+    DRAW: "bg-warning/10",
     CANCELLED: "bg-zinc-500/10",
-    PENDING: "bg-blue-500/10",
-    OPEN: "bg-blue-500/10",
+    PENDING: "bg-info/10",
+    OPEN: "bg-info/10",
   };
-  const profitColor = context.profit > 0 ? "text-emerald-400" : context.profit < 0 ? "text-red-400" : "text-zinc-400";
+  const profitColor = context.profit > 0 ? "text-success" : context.profit < 0 ? "text-danger" : "text-muted-foreground";
   const profitSign = context.profit > 0 ? "+" : "";
 
   return (
@@ -1001,18 +1001,18 @@ function OperationContextPanelInline({ context }: { context: import("../flow-con
 
 function ReplayTimelinePanelInline({ context }: { context: import("../flow-continuity/types/replay-context.types").ReplayContext }) {
   const RESULT_COLORS: Record<string, string> = {
-    WIN: "text-emerald-400",
-    LOSS: "text-red-400",
-    BREAKEVEN: "text-amber-400",
-    TIMEOUT: "text-zinc-400",
+    WIN: "text-success",
+    LOSS: "text-danger",
+    BREAKEVEN: "text-warning",
+    TIMEOUT: "text-muted-foreground",
   };
   const RESULT_BG: Record<string, string> = {
-    WIN: "bg-emerald-500/10",
-    LOSS: "bg-red-500/10",
-    BREAKEVEN: "bg-amber-500/10",
+    WIN: "bg-success/10",
+    LOSS: "bg-danger/10",
+    BREAKEVEN: "bg-warning/10",
     TIMEOUT: "bg-zinc-500/10",
   };
-  const profitColor = context.profit > 0 ? "text-emerald-400" : context.profit < 0 ? "text-red-400" : "text-zinc-400";
+  const profitColor = context.profit > 0 ? "text-success" : context.profit < 0 ? "text-danger" : "text-muted-foreground";
   const profitSign = context.profit > 0 ? "+" : "";
   const durationSec = (context.durationMs / 1000).toFixed(0);
   const timeStr = new Date(context.operationStartTime).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -1082,14 +1082,14 @@ function ReplayTimelinePanelInline({ context }: { context: import("../flow-conti
   );
 }
 
-function PerformanceInsightsInline({ context }: { context: PerformanceContext }) {
-  const SEVERITY_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
-    SUCCESS: { icon: <CheckCircle2 className="size-3 text-emerald-400" />, color: "text-emerald-400", bg: "bg-emerald-500/5" },
-    INFO: { icon: <Brain className="size-3 text-blue-400" />, color: "text-blue-400", bg: "bg-blue-500/5" },
-    WARNING: { icon: <AlertTriangle className="size-3 text-amber-400" />, color: "text-amber-400", bg: "bg-amber-500/5" },
-    DANGER: { icon: <AlertTriangle className="size-3 text-red-400" />, color: "text-red-400", bg: "bg-red-500/5" },
-  };
+const SEVERITY_CONFIG_INSIGHTS: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
+  SUCCESS: { icon: <CheckCircle2 className="size-3 text-success" />, color: "text-success", bg: "bg-success/5" },
+  INFO: { icon: <Brain className="size-3 text-info" />, color: "text-info", bg: "bg-info/5" },
+  WARNING: { icon: <AlertTriangle className="size-3 text-warning" />, color: "text-warning", bg: "bg-warning/5" },
+  DANGER: { icon: <AlertTriangle className="size-3 text-danger" />, color: "text-danger", bg: "bg-danger/5" },
+};
 
+function PerformanceInsightsInline({ context }: { context: PerformanceContext }) {
   const health = context.robotHealth;
 
   return (
@@ -1100,7 +1100,7 @@ function PerformanceInsightsInline({ context }: { context: PerformanceContext })
       </div>
 
       {/* Robot Health Score Mini */}
-      <div className={`p-2 rounded-lg mb-2 ${health.score >= 60 ? "bg-emerald-500/5 border border-emerald-500/20" : health.score >= 40 ? "bg-amber-500/5 border border-amber-500/20" : "bg-red-500/5 border border-red-500/20"}`}>
+      <div className={`p-2 rounded-lg mb-2 ${health.score >= 60 ? "bg-success/5 border border-success/20" : health.score >= 40 ? "bg-warning/5 border border-warning/20" : "bg-danger/5 border border-danger/20"}`}>
         <div className="flex items-center justify-between">
           <span className="text-[9px] font-semibold text-muted-foreground">SAÚDE DO ROBÔ</span>
           <span className={`text-sm font-extrabold ${health.color}`}>{health.score}/100</span>
@@ -1116,7 +1116,7 @@ function PerformanceInsightsInline({ context }: { context: PerformanceContext })
           </div>
         ) : (
           context.insights.slice(0, 6).map((insight) => {
-            const config = SEVERITY_CONFIG[insight.severity] || SEVERITY_CONFIG.INFO;
+            const config = SEVERITY_CONFIG_INSIGHTS[insight.severity] || SEVERITY_CONFIG_INSIGHTS.INFO;
             return (
               <div key={insight.id} className={`flex items-start gap-1.5 p-1.5 rounded ${config.bg}`}>
                 {config.icon}

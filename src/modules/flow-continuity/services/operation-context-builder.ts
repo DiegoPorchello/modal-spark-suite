@@ -88,6 +88,11 @@ export function buildOperationContext(params: {
     confidence: decisionContext.confidence,
     recoveryLevel,
     isRecovery,
+    traceId: entryRecord.traceId,
+    signalCandleTime: entryRecord.signalCandleTime,
+    expectedEntryCandle: entryRecord.expectedEntryCandle,
+    actualEntryTime: entryRecord.actualEntryTime,
+    candleId: entryRecord.candleId,
   };
 }
 

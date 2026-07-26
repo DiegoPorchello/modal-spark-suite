@@ -31,10 +31,10 @@ export function FilterRanking({ filters }: { filters: FilterPerformance[] }) {
               <span
                 className={`text-xs font-bold ${
                   f.approvalWinRate >= 60
-                    ? "text-emerald-400"
+                    ? "text-success"
                     : f.approvalWinRate >= 40
-                      ? "text-amber-400"
-                      : "text-red-400"
+                      ? "text-warning"
+                      : "text-danger"
                 }`}
               >
                 {f.approvalWinRate}% WR
@@ -47,7 +47,7 @@ export function FilterRanking({ filters }: { filters: FilterPerformance[] }) {
                 </div>
                 <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
                   <div
-                    className="h-full rounded-full bg-emerald-500"
+                    className="h-full rounded-full bg-success"
                     style={{ width: `${f.approvalWinRate}%` }}
                   />
                 </div>
@@ -58,7 +58,7 @@ export function FilterRanking({ filters }: { filters: FilterPerformance[] }) {
                 </div>
                 <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
                   <div
-                    className="h-full rounded-full bg-red-500"
+                    className="h-full rounded-full bg-danger"
                     style={{ width: `${f.rejectionWinRate}%` }}
                   />
                 </div>

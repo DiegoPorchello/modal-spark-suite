@@ -19,17 +19,17 @@ export const SignalBadge: React.FC<SignalBadgeProps> = ({
     switch (direction) {
       case "CALL":
         return {
-          bg: "bg-green-500/15",
-          border: "border-green-500/40",
-          text: "text-green-400",
+          bg: "bg-success/15",
+          border: "border-success/40",
+          text: "text-success",
           icon: "⬆️",
           label: "CALL",
         };
       case "PUT":
         return {
-          bg: "bg-red-500/15",
-          border: "border-red-500/40",
-          text: "text-red-400",
+          bg: "bg-danger/15",
+          border: "border-danger/40",
+          text: "text-danger",
           icon: "⬇️",
           label: "PUT",
         };
@@ -50,25 +50,25 @@ export const SignalBadge: React.FC<SignalBadgeProps> = ({
         return {
           pulse: true,
           label: "ATIVO",
-          border: "border-green-500/60",
+          border: "border-success/60",
         };
       case "blocked":
         return {
           pulse: false,
           label: "BLOQUEADO",
-          border: "border-yellow-500/60",
+          border: "border-warning/60",
         };
       case "pending":
         return {
           pulse: false,
           label: "PENDENTE",
-          border: "border-blue-500/60",
+          border: "border-info/60",
         };
       case "ready":
         return {
           pulse: true,
           label: "PRONTO",
-          border: "border-purple-500/60",
+          border: "border-primary/60",
         };
       default:
         return {
@@ -107,8 +107,8 @@ export const SignalBadge: React.FC<SignalBadgeProps> = ({
         <span>{config.label}</span>
         {statusConfig.pulse && (
           <span className="relative flex h-1.5 w-1.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-500" />
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success opacity-75" />
+            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-success" />
           </span>
         )}
       </div>
@@ -122,7 +122,7 @@ export const SignalBadge: React.FC<SignalBadgeProps> = ({
           "px-2 py-0.5 rounded text-[9px] font-semibold tracking-wider " +
           statusConfig.border +
           " " +
-          (statusConfig.pulse ? "bg-green-500/10 text-green-400" : "bg-yellow-500/10 text-yellow-400")
+          (statusConfig.pulse ? "bg-success/10 text-success" : "bg-warning/10 text-warning")
         }
       >
         {statusConfig.label}

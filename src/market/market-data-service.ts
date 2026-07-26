@@ -60,7 +60,7 @@ export class PumaMarketDataService {
   private _firstTickLogged = new Map<string, boolean>();
   private _firstCandleLogged = new Map<string, boolean>();
   /** Ativos sintéticos Puma — não existem na Binance, recebem candles via WS2/otc */
-  private readonly HYBRID_THRESHOLD = 70;
+  private readonly HYBRID_THRESHOLD = 200;
   private _hybridAssets = new Set<string>([
     "BETHUSDT",
     "BTSOLUSDT",
@@ -149,13 +149,14 @@ export class PumaMarketDataService {
    */
   addCandleFromExternal(symbol: string, candle: Candle, isClosed: boolean = true): void {
     const result: CandleAddResult = this._buffer.addCandle(symbol, candle, isClosed, "history");
+    // ... rest of existing code
 
     if (result === "added" || result === "closed") {
       const count = this._buffer.getBufferCount(symbol);
       this._candleCounts.set(symbol, count);
 
       // Log de monitoramento a cada 10 candles ou nos primeiros
-      if (count <= 10 || count % 20 === 0 || count === 70) {
+      if (count <= 10 || count % 20 === 0 || count === 200) {
         engineLogger.info("PumaMarketDataService", `[MONITOR] addCandleFromExternal: ${symbol}`, {
           count,
           totalCandles: this._candleCounts.get(symbol),
@@ -317,6 +318,10 @@ export class PumaMarketDataService {
       verify: data.verify,
     };
 
+    console.log(
+      `[TIMING] HANDLE_CANDLE symbol=${data.symbol} time=${data.time} open=${data.open} close=${data.close} tsDate=${Date.now()}`
+    );
+
     if (!this._firstCandleLogged.get(data.symbol)) {
       this._firstCandleLogged.set(data.symbol, true);
       engineLogger.info("PumaMarketDataService", `Primeiro Candle: ${data.symbol}`, {
@@ -341,7 +346,7 @@ export class PumaMarketDataService {
       const count = this._buffer.getBufferCount(data.symbol);
       this._candleCounts.set(data.symbol, count);
 
-      // Ativos híbridos usam threshold unificado (70)
+      // Ativos híbridos usam threshold unificado (200)
       const isHybrid = this._hybridAssets.has(data.symbol.toUpperCase());
       const minRequired = isHybrid ? this.HYBRID_THRESHOLD : this._buffer.minRequired;
 
@@ -374,6 +379,9 @@ export class PumaMarketDataService {
 
     // Candle fechado → notificar consumidores pesados (FlowRobot, Indicadores, IA, Executor, Recovery)
     if (result === "closed") {
+      console.log(
+        `[TIMING] CANDLE_CLOSED_CALLBACK symbol=${data.symbol} time=${candle.time} open=${candle.open} close=${candle.close} tsDate=${Date.now()}`
+      );
       this._options.onCandleClosed?.(data.symbol, candle);
     }
   }

@@ -14,6 +14,7 @@ import { reportLovableError } from "../lib/lovable-error-reporting";
 import { BrokerProvider } from "../hooks/useBroker";
 import { RobotProvider } from "../hooks/useRobot";
 import { PerformanceProvider } from "../hooks/usePerformance";
+import { AssetStoreProvider } from "../stores/asset-store-provider";
 import { MarketContextProvider } from "../contexts/MarketContext";
 import { connectLoggerToDaemon } from "../engine/logger";
 
@@ -210,10 +211,12 @@ function RootComponent() {
         <MarketContextProvider>
           <RobotProvider>
             <PerformanceProvider>
-              <ErrorBoundary>
-                {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-                <Outlet />
-              </ErrorBoundary>
+              <AssetStoreProvider>
+                <ErrorBoundary>
+                  {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+                  <Outlet />
+                </ErrorBoundary>
+              </AssetStoreProvider>
             </PerformanceProvider>
           </RobotProvider>
         </MarketContextProvider>

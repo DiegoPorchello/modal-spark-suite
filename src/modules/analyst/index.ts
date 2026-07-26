@@ -2,8 +2,8 @@ export { AnalystPanel } from "./AnalystPanel";
 export { useAnalystStore } from "./AnalystStore";
 export { analystBus } from "./EventBus";
 export { VoiceEngine, getVoiceEngine } from "./VoiceEngine";
-export { answerFromPerformanceContext, answerFromAdvisorContext, generateAllCopilotAnswers } from "./CopilotAnswers";
-export type { CopilotAnswer } from "./CopilotAnswers";
+export { answerFromPerformanceContext, answerFromAdvisorContext, answerFromLifecycleContext, answerFromLearningContext, answerFromConfidenceContext, generateAllCopilotAnswers } from "./CopilotAnswers";
+export type { CopilotAnswer, CopilotMarketContext, CopilotLifecycleContext, CopilotConfidenceContext } from "./CopilotAnswers";
 export type {
   AnalystEventType,
   AnalystMessage,
