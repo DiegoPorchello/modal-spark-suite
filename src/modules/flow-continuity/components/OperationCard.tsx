@@ -1,8 +1,8 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import type { RobotOperation } from "../../../engine/flow-robot-engine";
-import { ArrowUp, ArrowDown, X } from "lucide-react";
+import { ArrowUp, ArrowDown, X, Minus, Maximize2, Minimize2 } from "lucide-react";
 
 interface OperationCardProps {
   operation: RobotOperation | null;
@@ -15,6 +15,9 @@ export const OperationCard: React.FC<OperationCardProps> = ({
   onClose,
   onCancel,
 }) => {
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
+
   if (!operation) return null;
 
   const isSuccessful = operation.result === "win";
@@ -53,19 +56,56 @@ export const OperationCard: React.FC<OperationCardProps> = ({
     return colors[timeframe] || colors.DEFAULT;
   };
 
+  // Minimized view
+  if (isMinimized) {
+    return (
+      <div className="fixed bottom-4 right-4 z-50">
+        <button
+          onClick={() => setIsMinimized(false)}
+          className="flex items-center gap-3 px-4 py-3 bg-card border border-border rounded-lg shadow-2xl hover:bg-accent/50 transition-colors"
+        >
+          <div className={`size-2 rounded-full ${isActive ? "bg-warning animate-pulse" : isSuccessful ? "bg-success" : "bg-danger"}`} />
+          <div className="text-left">
+            <div className="text-xs font-bold">{operation.asset} {operation.direction.toUpperCase()}</div>
+            <div className="text-[10px] text-muted-foreground">R${(operation.amount || 0).toFixed(2)} • Clique para expandir</div>
+          </div>
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm">
-      <div className="panel w-[420px] p-5 shadow-2xl glow-success relative overflow-hidden">
+    <div className={`fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm ${isExpanded ? "p-4" : ""}`}>
+      <div className={`panel p-5 shadow-2xl glow-success relative overflow-hidden transition-all duration-200 ${
+        isExpanded ? "w-full max-w-4xl h-[85vh] overflow-y-auto" : "w-[420px]"
+      }`}>
         <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-success/50 via-warning/50 to-danger/50" />
 
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-sm font-bold tracking-wide text-foreground">OPERAÇÃO EM TEMPO REAL</h3>
-          <button
-            onClick={onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <X className="size-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsMinimized(true)}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-accent/50 text-muted-foreground hover:text-foreground transition-colors"
+              title="Minimizar"
+            >
+              <Minus className="size-3.5" />
+            </button>
+            <button
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-accent/50 text-muted-foreground hover:text-foreground transition-colors"
+              title={isExpanded ? "Restaurar" : "Expandir"}
+            >
+              {isExpanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+            </button>
+            <button
+              onClick={onClose}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-danger/20 text-muted-foreground hover:text-danger transition-colors"
+              title="Fechar"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-3 gap-3 mb-4">

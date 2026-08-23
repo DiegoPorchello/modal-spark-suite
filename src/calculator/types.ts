@@ -1,4 +1,4 @@
-export type Outcome = "WIN" | "LOSS";
+export type Outcome = "WIN" | "LOSS" | "DRAW";
 
 export interface RecoveryConfig {
   initialStake: number;
@@ -36,6 +36,7 @@ export interface FSMState {
   recoveryHealth: number;
   totalWins: number;
   totalLosses: number;
+  totalDraws: number;
   winRate: number;
   sessionStartTime: Date;
   levels: DynamicLevel[];

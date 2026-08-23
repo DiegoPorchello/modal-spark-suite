@@ -159,6 +159,7 @@ export class PumaBrokerAdapter implements IBroker {
   // Callbacks
   private _onPriceCallbacks: Array<(price: MarketPrice) => void> = [];
   private _onCandleCloseCallbacks: Array<(candle: Candle) => void> = [];
+  private _onCandleUpdateCallbacks: Array<(candle: Candle) => void> = [];
 
   // Trade result via PumaSocketClient (tradeUpdate) + REST polling fallback
   private _pendingTradeResults = new Map<
@@ -462,6 +463,16 @@ export class PumaBrokerAdapter implements IBroker {
             spread: 0,
             timestamp: Date.now(),
           });
+        });
+        this._onCandleUpdateCallbacks.forEach((cb) => {
+          try {
+            cb(candle);
+          } catch (err) {
+            engineLogger.error("PumaBroker", "Callback de candle update falhou", {
+              error: String(err),
+              symbol,
+            });
+          }
         });
       },
       onCandleClosed: (symbol, candle) => {
@@ -1096,7 +1107,10 @@ export class PumaBrokerAdapter implements IBroker {
     const t0 = performance.now();
     console.log(`[AUDIT] [HTTP_REQUEST] local=${new Date().toISOString()} asset=${params.asset} direction=${direction} perf=${t0}`);
     try {
-      res = await fetchWithRetry(`${DAEMON_URL}/trades`, {
+      // ⚠️ SEM RETRY neste POST: se a 1ª tentativa chegou ao broker e a resposta
+      // se perdeu, reenviar cria uma SEGUNDA ordem idêntica (entrada duplicada).
+      // Falhas propagam ao ExecutionEngine, que registra o erro e NÃO re-dispara.
+      res = await fetch(`${DAEMON_URL}/trades`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1369,6 +1383,15 @@ export class PumaBrokerAdapter implements IBroker {
     };
   }
 
+  subscribeCandleUpdate(onCandleUpdate: (candle: Candle) => void): () => void {
+    this._onCandleUpdateCallbacks.push(onCandleUpdate);
+    return () => {
+      this._onCandleUpdateCallbacks = this._onCandleUpdateCallbacks.filter(
+        (cb) => cb !== onCandleUpdate,
+      );
+    };
+  }
+
   async getBalance(): Promise<AccountBalance> {
     await this._fetchBalance();
     return {
@@ -1395,17 +1418,27 @@ export class PumaBrokerAdapter implements IBroker {
         return "LOSS";
       case "DRAW":
         return "DRAW";
+      // Estados TRANSICIONAIS do daemon (proxy_daemon.py): ACTIVE até
+      // expiresAt+30s, depois WAITING_RESULT até receber o push tradeResult
+      // da Puma. NÃO são finais — o adapter deve continuar o polling até o
+      // daemon reportar WIN/LOSS/DRAW. Tratar como ACTIVE evita o bug de
+      // marcar a operação como DRAW prematuramente.
       case "ACTIVE":
       case "PENDING":
+      case "WAITING_RESULT":
+      case "WAITING":
         return "ACTIVE";
       case "EXPIRED":
-        return "EXPIRED";
       case "CANCELED":
       case "CANCELLED":
-        return "CANCELED";
-      default:
-        console.warn("[PUMA] Status desconhecido:", raw);
+      case "ORPHAN":
         return "EXPIRED";
+      default:
+        console.warn(
+          "[PUMA] Status desconhecido tratado como ACTIVE (continua polling):",
+          raw,
+        );
+        return "ACTIVE";
     }
   }
 

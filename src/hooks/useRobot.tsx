@@ -15,6 +15,7 @@ import type {
   RobotOperation,
   RobotEvent,
 } from "../engine/flow-robot-engine";
+import type { Candle } from "../market/types";
 import { DEFAULT_ROBOT_CONFIG } from "../engine/flow-robot-engine";
 
 interface RobotContextValue {
@@ -28,6 +29,8 @@ interface RobotContextValue {
   updateConfig: (config: Partial<RobotConfig>) => void;
   updateCalculatorLevels: (_niveis: number[]) => void;
   updateCalculatorPayout: (payout: number) => void;
+  subscribeCandleClose: (onCandleClose: (candle: Candle) => void) => () => void;
+  subscribeCandleUpdate: (onCandleUpdate: (candle: Candle) => void) => () => void;
 }
 
 function createDefaultState(): RobotState {
@@ -62,6 +65,7 @@ function createDefaultState(): RobotState {
     executionPhase: "idle",
     totalDraws: 0,
     healthCheck: null,
+    lastAnalysesByAsset: {},
   };
 }
 
@@ -161,6 +165,14 @@ export function RobotProvider({ children }: { children: ReactNode }) {
     if (engineRef.current) setState(engineRef.current.state);
   }, []);
 
+  const subscribeCandleClose = useCallback((onCandleClose: (candle: Candle) => void) => {
+    return engineRef.current?.subscribeCandleClose(onCandleClose) ?? (() => {});
+  }, []);
+
+  const subscribeCandleUpdate = useCallback((onCandleUpdate: (candle: Candle) => void) => {
+    return engineRef.current?.subscribeCandleUpdate(onCandleUpdate) ?? (() => {});
+  }, []);
+
   return (
     <RobotContext.Provider
       value={{
@@ -174,6 +186,8 @@ export function RobotProvider({ children }: { children: ReactNode }) {
         updateConfig,
         updateCalculatorLevels,
         updateCalculatorPayout,
+        subscribeCandleClose,
+        subscribeCandleUpdate,
       }}
     >
       {children}

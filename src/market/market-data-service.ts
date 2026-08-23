@@ -334,6 +334,12 @@ export class PumaMarketDataService {
       });
     }
 
+    // Captura a vela ANTERIOR (que está sendo fechada) ANTES de inserir a nova.
+    // O candle que chega (result "closed") é a PRÓXIMA vela em formação; sua
+    // informação de fechamento ainda é o open (close≈open → verde). A vela
+    // realmente fechada é a anterior, com seu close FINAL já consolidado no buffer.
+    const closedCandle = this._buffer.getLastCandle(data.symbol);
+
     const result: CandleAddResult = this._buffer.addCandle(data.symbol, candle, true, "realtime");
 
     // Notificar UI sempre que o candle for atualizado
@@ -378,11 +384,12 @@ export class PumaMarketDataService {
     }
 
     // Candle fechado → notificar consumidores pesados (FlowRobot, Indicadores, IA, Executor, Recovery)
-    if (result === "closed") {
+    // IMPORTANTE: entrega a vela REALMENTE FECHADA (com close final), não a nova vela em formação.
+    if (result === "closed" && closedCandle) {
       console.log(
-        `[TIMING] CANDLE_CLOSED_CALLBACK symbol=${data.symbol} time=${candle.time} open=${candle.open} close=${candle.close} tsDate=${Date.now()}`
+        `[TIMING] CANDLE_CLOSED_CALLBACK symbol=${data.symbol} time=${closedCandle.time} open=${closedCandle.open} close=${closedCandle.close} tsDate=${Date.now()}`
       );
-      this._options.onCandleClosed?.(data.symbol, candle);
+      this._options.onCandleClosed?.(data.symbol, closedCandle);
     }
   }
 

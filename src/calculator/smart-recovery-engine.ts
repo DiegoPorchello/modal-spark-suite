@@ -33,11 +33,16 @@ export class SmartRecoveryEngine implements IRecoveryEngine {
     if (this.isStopped()) return;
 
     const stake = this.getCurrentStake();
-    const profit = resultado === "WIN" ? stake * this.config.payout : -stake;
 
     if (resultado === "WIN") {
+      const profit = stake * this.config.payout;
       this.handleWin(profit, stake);
+    } else if (resultado === "DRAW") {
+      // DRAW: o stake é devolvido (empate). Não há lucro nem prejuízo, e a
+      // recuperação NÃO deve escalar — mantém nível, entrada e orçamento.
+      this.handleDraw();
     } else {
+      const profit = -stake;
       this.handleLoss(stake);
     }
 
@@ -45,6 +50,12 @@ export class SmartRecoveryEngine implements IRecoveryEngine {
     this.state.currentStake = this.getCurrentStake();
     this.state.state = this.getFSMStateLabel();
     this.updateStopTracking();
+  }
+
+  private handleDraw(): void {
+    // Neutro: apenas contabiliza o empate. Stake/level/budget inalterados,
+    // exatamente como o motor de recuperação do robô (registerDraw).
+    this.state.totalDraws++;
   }
 
   getState(): FSMState {
@@ -294,6 +305,7 @@ export class SmartRecoveryEngine implements IRecoveryEngine {
       recoveryHealth: 100,
       totalWins: 0,
       totalLosses: 0,
+      totalDraws: 0,
       winRate: 0,
       sessionStartTime: new Date(),
       levels: [],

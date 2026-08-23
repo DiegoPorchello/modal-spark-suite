@@ -8,6 +8,10 @@ import {
   DEFAULT_HYBRID_PROBABILITY_CONFIG,
   type HybridProbabilityConfig,
 } from "./decision/HybridProbabilityEngine";
+import {
+  HybridCatalogEngine,
+  type HybridCatalogState,
+} from "./decision/HybridCatalogEngine";
 import { DecisionTimeline } from "./decision-timeline";
 import { ScoreEngine } from "./decision/ScoreEngine";
 import { analystBus } from "../modules/analyst/EventBus";
@@ -92,6 +96,7 @@ export type DecisionExitStatus =
   | "BLOCKED_RISK"
   | "BLOCKED_DUPLICATE"
   | "BLOCKED_RACE_CONDITION"
+  | "APPROVED_SOROSGALE"
   | "ERROR";
 
 class SchedulerMetrics {
@@ -265,6 +270,9 @@ export interface RobotState {
   worstEntryPrecision: number;
   executionPhase: string;
   healthCheck: HealthCheckResult | null;
+  lastAnalysesByAsset: Record<string, DecisionResult>;
+  // ── Hybrid Catalog (motor de catalogação dos 5 híbridos) ──
+  hybridCatalog?: HybridCatalogState;
 }
 
 export interface HealthCheckItem {
@@ -336,7 +344,7 @@ export const DEFAULT_ROBOT_CONFIG: RobotConfig = {
   ],
   marketMode: "AUTO",
   operationProfile: "AUTO",
-  hybridProbabilityConfig: { ...DEFAULT_HYBRID_PROBABILITY_CONFIG },
+  hybridProbabilityConfig: { ...DEFAULT_HYBRID_PROBABILITY_CONFIG, useQuadrant: true },
 };
 
 const CONFIG_STORAGE_KEY = "nexor_config";
@@ -392,6 +400,7 @@ export class FlowRobotEngine {
   private _loopTimer: ReturnType<typeof setTimeout> | null = null;
   private _countdownTimer: ReturnType<typeof setInterval> | null = null;
   private decisionEngine: DecisionEngine;
+  private hybridCatalogEngine: HybridCatalogEngine;
   private _candleCloseUnsub: (() => void) | null = null;
   private _sessionUnsub: (() => void) | null = null;
   private assetCooldowns: Map<string, number> = new Map();
@@ -410,12 +419,30 @@ export class FlowRobotEngine {
   private static readonly MAX_DECISION_HISTORY = 20;
   private _lastOperationContext: OperationContext | null = null;
   private _operationHistory: OperationContext[] = [];
+
+  // ══ ANTECIPAÇÃO DE RECOVERY (vela 5) ══
+  // Preço ao vivo cacheado via subscribePrices para prever LOSS ~5s antes do vencimento.
+  private _priceCache: Record<string, { bid: number; ask: number; ts: number }> = {};
+  private _priceUnsub: (() => void) | null = null;
+  private _anticipationTimer: ReturnType<typeof setTimeout> | null = null;
+  // recovery antecipado já posicionado (previsto LOSS na vela 4 → recovery na vela 5)
+  private _anticipatedLoss: boolean = false;
+  // uma trade de recovery (vela 5) está em jogo — ao resolver, reseta o quadrante
+  private _recoveryPhase: boolean = false;
+  // a última ordem enviada foi um recovery (não o primário) — não reagendar anticipation
+  private _isRecoveryTradePlaced: boolean = false;
+  // traceId do recovery atualmente em voo (vela 5) — identifica qual registro
+  // resolve o ciclo; enquanto existir, um LOSS do primário NÃO reseta flags.
+  private _pendingRecoveryTraceId: string | null = null;
   private static readonly MAX_OPERATION_HISTORY = 100;
   private _lastReplayContext: ReplayContext | null = null;
   private _replayHistory: ReplayContext[] = [];
   private static readonly MAX_REPLAY_HISTORY = 100;
   private _lastPerformanceContext: PerformanceContext | null = null;
   private _lastSignalLogId: string | null = null;
+
+  // ══ SOROSGALE TARGET: após loss, forçar entrada no mesmo par/direção ══
+  private _sorosgaleTarget: { asset: string; direction: "call" | "put"; timeframe: string } | null = null;
 
   private _logState(event: string, detail?: Record<string, unknown>): void {
     engineLogger.info("FlowRobot", `[STATE] ${event}`, {
@@ -460,10 +487,17 @@ export class FlowRobotEngine {
 
     this.smartRecovery = new SmartRecoveryEngine(() => this._state.config);
     this.decisionEngine = new DecisionEngine();
+    this.hybridCatalogEngine = new HybridCatalogEngine();
     this.executionEngine = new ExecutionEngine(broker);
 
     // Substitui pelo estado completo
     this._state = this._buildInitialState(initialConfig, currentSession, sessionInfo);
+
+    // Escuta mudanças de estado do HybridCatalogEngine
+    this.hybridCatalogEngine.onStateChange((catalogState) => {
+      this._state.hybridCatalog = catalogState;
+      this._emit("state-changed");
+    });
 
     // Escuta mudanças de sessão
     const sessionManager = this.broker.getSessionManager();
@@ -524,6 +558,14 @@ export class FlowRobotEngine {
 
   get state(): RobotState {
     return { ...this._state, operations: [...this._state.operations] };
+  }
+
+  subscribeCandleClose(onCandleClose: (candle: Candle) => void): () => void {
+    return this.broker.subscribeCandleClose(onCandleClose);
+  }
+
+  subscribeCandleUpdate(onCandleUpdate: (candle: Candle) => void): () => void {
+    return this.broker.subscribeCandleUpdate(onCandleUpdate);
   }
 
   start(config?: Partial<RobotConfig>): void {
@@ -667,6 +709,16 @@ export class FlowRobotEngine {
       this._onCandleClose(candle),
     );
 
+    // Inscreve em preços ao vivo (usado pela antecipação de recovery na vela 5)
+    if (this._priceUnsub) this._priceUnsub();
+    const priceAssets =
+      this._state.config.assets && this._state.config.assets.length
+        ? this._state.config.assets
+        : [this._state.config.asset];
+    this._priceUnsub = this.broker.subscribePrices(priceAssets, (p) => {
+      this._priceCache[p.asset] = { bid: p.bid, ask: p.ask, ts: p.timestamp ?? Date.now() };
+    });
+
     // Inicia ExecutionEngine (monitor de alta precisão 50ms)
     this.executionEngine.start();
 
@@ -690,6 +742,42 @@ export class FlowRobotEngine {
       }
     }
 
+    // ══ HYBRID CATALOG: cataloga os 5 ativos híbridos antes de iniciar ══
+    const profile = mergedConfig.operationProfile ?? "AUTO";
+    if (profile === "HYBRID_PROBABILITY") {
+      engineLogger.info("FlowRobot", "═══ INICIANDO CATALOGAÇÃO HÍBRIDA ═══", {});
+      this.hybridCatalogEngine
+        .catalogAllAssets(async (asset) => {
+          return this.broker.getCandles(asset, "M1", 500);
+        })
+        .then((catalogState) => {
+          engineLogger.info("FlowRobot", "═══ CATALOGAÇÃO HÍBRIDA COMPLETA ═══", {
+            selectedAsset: catalogState.selectedAsset,
+            assertiveness: catalogState.assertiveness.toFixed(1),
+            winRate: catalogState.winRate.toFixed(1),
+          });
+
+          // Usa o ativo selecionado como ativo principal
+          if (catalogState.selectedAsset) {
+            mergedConfig.asset = catalogState.selectedAsset;
+            this._state.config.asset = catalogState.selectedAsset;
+          }
+
+          // Continua com o fluxo normal
+          this._continueStartup(mergedConfig);
+        })
+        .catch((err) => {
+          engineLogger.warn("FlowRobot", "Catalogação híbrida falhou — usando ativo padrão", {
+            error: String(err),
+          });
+          this._continueStartup(mergedConfig);
+        });
+    } else {
+      this._continueStartup(mergedConfig);
+    }
+  }
+
+  private _continueStartup(mergedConfig: RobotConfig): void {
     // Busca saldo real da Puma antes de iniciar operações
     this._refreshBalance()
       .then(() => {
@@ -766,6 +854,15 @@ export class FlowRobotEngine {
       this._candleCloseUnsub();
       this._candleCloseUnsub = null;
     }
+    if (this._priceUnsub) {
+      this._priceUnsub();
+      this._priceUnsub = null;
+    }
+    this._anticipatedLoss = false;
+    this._recoveryPhase = false;
+    this._isRecoveryTradePlaced = false;
+    this._pendingRecoveryTraceId = null;
+    this._priceCache = {};
     this._state.status = "stopped";
     this._state.activeOperation = null;
     this._state.nextTrade = null;
@@ -814,11 +911,21 @@ export class FlowRobotEngine {
       this._candleCloseUnsub();
       this._candleCloseUnsub = null;
     }
+    if (this._priceUnsub) {
+      this._priceUnsub();
+      this._priceUnsub = null;
+    }
+    this._anticipatedLoss = false;
+    this._recoveryPhase = false;
+    this._isRecoveryTradePlaced = false;
+    this._pendingRecoveryTraceId = null;
+    this._priceCache = {};
     const config = this._state.config;
     this.smartRecovery.reset();
     this.smartRecovery.regenerateLevelTable();
     this.assetCooldowns.clear();
     this._globalCooldownUntil = 0;
+    this._sorosgaleTarget = null;
     this._sessionStarted = false;
     const sessionInfo = this.broker.getSessionInfo();
     this._state = this._buildInitialState(config, sessionInfo.currentSession, sessionInfo);
@@ -1241,6 +1348,7 @@ export class FlowRobotEngine {
       FlowRobotEngine._isProcessing = true;
       tl.event("MUTEX_ACQUIRED");
 
+      try {
       engineLogger.info("FlowRobot", `═══ JANELA DE DECISÃO (~200ms antes do fechamento) ═══`, {});
 
       // Risk checks rápidos
@@ -1358,6 +1466,88 @@ export class FlowRobotEngine {
         this._scheduleNextOperation(this._getIntervalSeconds(), "INVALID_ENTRY");
         _exitLog("BLOCKED_INVALID_ENTRY", { valor: entrada.valor, level: entrada.level });
         return;
+      }
+
+      // ══ SOROSGALE: forçar entrada na próxima vela após LOSS ══
+      if (this._sorosgaleTarget && this._state.config.operationProfile === "HYBRID_PROBABILITY") {
+        const target = this._sorosgaleTarget;
+        engineLogger.info(
+          "FlowRobot",
+          `🎯 SOROSGALE DECISION TIME: forçando ${target.asset} ${target.direction.toUpperCase()} (level ${entrada.level})`,
+          {},
+        );
+
+        const selectedTimeframe = target.timeframe;
+        const expiration = TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
+
+        // Buscar candles para obter entryPrice e análise atualizada
+        try {
+          const candles = await this.broker.getCandles(target.asset, selectedTimeframe, getFetchSize(this._state.config.operationProfile ?? "HYBRID_PROBABILITY"));
+          if (candles && candles.length >= getMinCandles(this._state.config.operationProfile ?? "HYBRID_PROBABILITY")) {
+            const decision = this.decisionEngine.analyze(candles, target.asset, {
+              operationProfile: this._state.config.operationProfile,
+              hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
+              timeframe: selectedTimeframe,
+            });
+            this._state.lastAnalysis = decision;
+            this._state.config.asset = target.asset;
+            this._state.selectedTimeframe = selectedTimeframe;
+
+            const entryPrice = candles[candles.length - 1].close;
+            const payout = await this.broker.getPayout(target.asset).catch(() => 0.85);
+
+            const did = this._nextDecisionId();
+            const traceId = `tr_soros_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            const nowTs = Date.now();
+            const signalCandle = candles[candles.length - 1];
+
+            const nextTrade: NextTrade = {
+              traceId,
+              decisionId: did,
+              symbol: target.asset,
+              direction: target.direction,
+              score: decision.scoreBreakdown?.total ?? 0,
+              amount: entrada.valor,
+              expiration,
+              entryPrice,
+              payout,
+              timeframe: selectedTimeframe,
+              valid: true,
+              decidedAt: nowTs,
+              signalCandleTime: signalCandle.time,
+              signalCandleOpen: signalCandle.open,
+              signalCandleClose: signalCandle.close,
+              candleId: `${target.asset}_${selectedTimeframe}_${signalCandle.time}`,
+            };
+
+            this.executionEngine.setNextTrade(nextTrade);
+            this._state.nextTrade = nextTrade;
+            this._state.currentEntry = entrada.valor;
+            this._state.entryNumber = entrada.entry;
+            this._isRecoveryTradePlaced = true;
+            this._recoveryPhase = true;
+            this._pendingRecoveryTraceId = traceId;
+            this._logState("SOROSGALE_NEXT_TRADE_SET", { direction: target.direction, score: nextTrade.score, stake: entrada.valor });
+            this._emit("state-changed");
+
+            // Limpa sorosgale target — já agendado
+            this._sorosgaleTarget = null;
+
+            engineLogger.info(
+              "FlowRobot",
+              `🎯 SOROSGALE NEXT_TRADE SET: ${target.asset} ${target.direction.toUpperCase()} stake=${entrada.valor} level=${entrada.level}`,
+              { decisionId: did, traceId },
+            );
+            _exitLog("APPROVED_SOROSGALE", { direction: target.direction, score: nextTrade.score });
+            return;
+          }
+        } catch (e) {
+          engineLogger.error("FlowRobot", `Erro no sorosgale decision time: ${target.asset}`, { error: String(e) });
+        }
+
+        // Se falhou, limpa target e segue fluxo normal
+        engineLogger.warn("FlowRobot", `🎯 SOROSGALE: falha ao buscar candles — limpando target, fluxo normal`);
+        this._sorosgaleTarget = null;
       }
 
       // Health check pré-scan
@@ -1583,6 +1773,7 @@ export class FlowRobotEngine {
         `[TIMING] BEFORE_SET_NEXT_TRADE traceId=${traceId} asset=${asset} dir=${marketDir} signalCandle=${signalCandleTime} tsDate=${Date.now()} tsPerf=${t1.toFixed(2)}`
       );
       this.executionEngine.setNextTrade(nextTrade);
+      this._isRecoveryTradePlaced = false;
       tl.event("NEXT_TRADE_SET", { decisionId: did, direction: marketDir, stake: entrada.valor });
       console.log(
         `[TIMING] AFTER_SET_NEXT_TRADE traceId=${traceId} asset=${asset} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
@@ -1662,6 +1853,9 @@ export class FlowRobotEngine {
     } finally {
       FlowRobotEngine._isProcessing = false;
     }
+    } finally {
+      FlowRobotEngine._isProcessing = false;
+    }
   }
 
   /**
@@ -1722,6 +1916,29 @@ export class FlowRobotEngine {
     this._state.status = "waiting-result";
     this._logState("WAITING_RESULT", { orderId: operation.orderId });
     this._emit("operation-opened", operation);
+
+    // ══ ANTECIPAÇÃO DE RECOVERY (vela 5) ══
+    // Apenas para o trade PRIMÁRIO (vela 4). Se for recovery, não reagenda.
+    this._clearAnticipationTimer();
+    if (!this._isRecoveryTradePlaced) {
+      const openTime = record.sendTime;
+      const expiration = operation.expirationSeconds ?? 60;
+      const delayMs = Math.max(
+        1000,
+        (expiration - 5) * 1000 - (Date.now() - openTime),
+      );
+      this._anticipationTimer = setTimeout(() => {
+        this._anticipationTimer = null;
+        this._runAnticipation(operation).catch((e) =>
+          engineLogger.error("FlowRobot", "Erro na anticipation", { error: String(e) }),
+        );
+      }, delayMs);
+      engineLogger.info(
+        "FlowRobot",
+        `⏱️ ANTICIPATION agendada em ${Math.round(delayMs / 1000)}s para ${operation.asset} (vela 4)`,
+        {},
+      );
+    }
 
     const tradeExpiration =
       this._state.nextTrade?.expiration ??
@@ -1807,15 +2024,11 @@ export class FlowRobotEngine {
         }
       }
 
-      // DRAW detection: se broker retorna LOSS com profit=0, é empate
-      if (effectiveStatus === "LOSS" && brokerProfit === 0) {
-        engineLogger.info("FlowRobot", `🔄 DRAW detectado: status=LOSS mas profit=0. Tratando como DRAW.`, {
-          tradeId: record.tradeId,
-          finalStatus,
-          brokerProfit,
-        });
-        effectiveStatus = "DRAW";
-      }
+      // DRAW só é DRAW quando o broker envia status explícito "DRAW".
+      // Não convertemos mais LOSS+profit=0 em DRAW: em opções binárias um
+      // LOSS real tem profit negativo; profit=0 geralmente significa campo
+      // ausente, e rebaixar LOSS→DRAW impedia a smart recovery de escalar
+      // (entry fixa em R$ 2,00). O status vem normalizado de _normalizeStatus.
 
       // UNKNOWN: trade não encontrada (404 do daemon) — não altera SorosGale
       if (effectiveStatus === "UNKNOWN") {
@@ -1898,6 +2111,9 @@ export class FlowRobotEngine {
 
       const isWin = effectiveStatus === "WIN";
       const isLoss = effectiveStatus === "LOSS";
+      // Este registro é o recovery (vela 5) que estava aguardando resultado?
+      const isRecoveryRecord =
+        !!this._pendingRecoveryTraceId && record.traceId === this._pendingRecoveryTraceId;
 
       if (isWin) {
         operation.result = "win";
@@ -1914,6 +2130,21 @@ export class FlowRobotEngine {
           nextStake: winStake,
         });
         this._state.totalWins++;
+
+        // Limpa sorosgale target — ciclo recuperado com WIN
+        this._sorosgaleTarget = null;
+
+        // Primário venceu mas um recovery foi antecipado (previsão errada de
+        // LOSS) — cancela a ordem na fila ANTES que ela dispare na vela 5.
+        if (this._pendingRecoveryTraceId && !isRecoveryRecord) {
+          this.executionEngine.clearNextTrade();
+          this._state.nextTrade = null;
+          engineLogger.info(
+            "FlowRobot",
+            `🎯 ANTICIPATION: primário venceu — recovery antecipado CANCELADO (${operation.asset})`,
+            {},
+          );
+        }
 
         this._state.sessionProfit += operation.profit;
         this._refreshBalance().catch((err) =>
@@ -1950,13 +2181,77 @@ export class FlowRobotEngine {
           },
         );
         this._state.totalLosses++;
-        const cooldownMs = (this._state.config.assetCooldownMinutes ?? 5) * 60 * 1000;
-        this.assetCooldowns.set(operation.asset, Date.now() + cooldownMs);
-        engineLogger.info(
-          "FlowRobot",
-          `Cooldown ativado para ${operation.asset} — ${this._state.config.assetCooldownMinutes ?? 5}min após loss`,
-          {},
-        );
+        // HYBRID_PROBABILITY: sem cooldown pós-loss — entrada imediata no próximo nível (sorosgale)
+        if (this._state.config.operationProfile !== "HYBRID_PROBABILITY") {
+          const cooldownMs = (this._state.config.assetCooldownMinutes ?? 5) * 60 * 1000;
+          this.assetCooldowns.set(operation.asset, Date.now() + cooldownMs);
+          engineLogger.info(
+            "FlowRobot",
+            `Cooldown ativado para ${operation.asset} — ${this._state.config.assetCooldownMinutes ?? 5}min após loss`,
+            {},
+          );
+        } else {
+          engineLogger.info(
+            "FlowRobot",
+            `HYBRID_PROBABILITY: sem cooldown — ${operation.asset} entrará na próxima vela (sorosgale nível ${this.smartRecovery.getState().currentLevel})`,
+            {},
+          );
+        }
+
+        // ══ SOROSGALE TARGET: definir alvo para próxima vela (apenas 1 tentativa) ══
+        let justSetSorosTarget = false;
+        if (this._state.config.operationProfile === "HYBRID_PROBABILITY") {
+          if (this._anticipatedLoss) {
+            // Recovery já foi antecipado na vela 5 (previsto LOSS ~5s antes do
+            // vencimento da vela 4). Não reagendar — a ordem já está na fila.
+            engineLogger.info(
+              "FlowRobot",
+              `🎯 ANTICIPATION: recovery já posicionado na vela 5 — pulando sorosgale target (${operation.asset})`,
+              {},
+            );
+            this._sorosgaleTarget = null;
+          } else if (isRecoveryRecord) {
+            // Este LOSS é da própria recovery (vela 5) — não reagenda. O reset do
+            // quadrante acontece no bloco final (independente de WIN/LOSS).
+            this._sorosgaleTarget = null;
+          } else if (this._sorosgaleTarget) {
+            // Já era sorosgale — loss na vela 5: encerra a tentativa de recovery
+            // e RESETA o quadrante (volta ao stake base) para o próximo ciclo.
+            engineLogger.info(
+              "FlowRobot",
+              `🎯 SOROSGALE: loss na vela 5 (${operation.asset}) — recovery encerrado, quadrante resetado (nível ${this.smartRecovery.getState().currentLevel} → 0)`,
+              {},
+            );
+            this._sorosgaleTarget = null;
+            this.smartRecovery.resetLevel();
+          } else {
+            // Primeira perda (vela 4): define target para vela 5
+            this._sorosgaleTarget = {
+              asset: operation.asset,
+              direction: operation.direction.toLowerCase() as "call" | "put",
+              timeframe: operation.timeframe ?? this._state.selectedTimeframe ?? "M1",
+            };
+            justSetSorosTarget = true;
+            engineLogger.info(
+              "FlowRobot",
+              `🎯 SOROSGALE TARGET definido: ${operation.asset} ${operation.direction} (próxima vela)`,
+              {},
+            );
+          }
+        }
+
+        // Dispara a janela de decisão IMEDIATAMENTE para posicionar a recovery
+        // na vela seguinte (não espera o próximo candle-close, que empurraria a
+        // entrada mais uma vela adiante). _onDecisionTime possui o branch
+        // sorosgale que força a entrada ignorando o gate de step.
+        if (justSetSorosTarget && !this._anticipatedLoss) {
+          setTimeout(() => {
+            this._onDecisionTime().catch((err) =>
+              engineLogger.error("FlowRobot", "Erro ao disparar recovery sorosgale", { error: String(err) }),
+            );
+          }, 250);
+        }
+
         this._state.sessionProfit -= operation.amount;
         this._refreshBalance().catch((err) =>
           engineLogger.error("FlowRobot", "Falha ao atualizar saldo após LOSS", {
@@ -1984,6 +2279,17 @@ export class FlowRobotEngine {
           nextStake: this.smartRecovery.getCurrentStake(),
         });
         this._state.totalDraws++;
+        // DRAW no primário com recovery antecipado na fila — cancela (não há mais
+        // motivo para recovery: o primário não perdeu).
+        if (this._pendingRecoveryTraceId && !isRecoveryRecord) {
+          this.executionEngine.clearNextTrade();
+          this._state.nextTrade = null;
+          engineLogger.info(
+            "FlowRobot",
+            `🎯 ANTICIPATION: primário empatou — recovery antecipado CANCELADO (${operation.asset})`,
+            {},
+          );
+        }
         this._state.currentEntry = this.smartRecovery.getCurrentStake();
         this._state.entryNumber = this.smartRecovery.getState().entryNumber;
         this._state.currentRecoveryStep = this.smartRecovery.getState().currentLevel;
@@ -1997,14 +2303,22 @@ export class FlowRobotEngine {
       ScoreEngine.recalibrateWeights();
 
       // ══ COOLDOWN GLOBAL ══
-      // Definido ANTES de limpar activeOperation/status para evitar race condition
-      // com _runOperationCycle (que verifica cooldown antes de entrar)
-      this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
-      engineLogger.info(
-        "FlowRobot",
-        `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após trade`,
-        {},
-      );
+      // HYBRID_PROBABILITY: sem cooldown global — entrada imediata no próximo nível (sorosgale)
+      if (this._state.config.operationProfile !== "HYBRID_PROBABILITY") {
+        this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+        engineLogger.info(
+          "FlowRobot",
+          `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após trade`,
+          {},
+        );
+      } else {
+        this._globalCooldownUntil = 0;
+        engineLogger.info(
+          "FlowRobot",
+          `HYBRID_PROBABILITY: sem cooldown global — próximo ciclo imediato`,
+          {},
+        );
+      }
 
       operation.status = "completed";
       operation.closedAt = new Date();
@@ -2123,6 +2437,7 @@ export class FlowRobotEngine {
               },
             );
             this._stopByRisk(`IA: ${aiDecision.reason}`);
+            this._sorosgaleTarget = null;
             return;
           }
         }
@@ -2170,6 +2485,43 @@ export class FlowRobotEngine {
 
       // Agenda re-análise rápida durante o cooldown
       this._scheduleNextOperation(5, "COOLDOWN_ACTIVE");
+
+      // ══ RESET DE QUADRANTE (modelo: vela 4 → recovery vela 5 → recomeça) ══
+      // HYBRID_PROBABILITY: o ciclo é primário + no máx. 1 recovery, depois reinicia.
+      // REGRA: só reseta quando (a) o PRÓPRIO recovery resolveu, ou (b) primário WIN.
+      // Um LOSS do primário NUNCA reseta aqui — quem vem depois é o recovery,
+      // e é o resultado DELE que encerra o ciclo (evita rearme duplicado).
+      if (this._state.config.operationProfile === "HYBRID_PROBABILITY") {
+        if (isRecoveryRecord) {
+          // O RECOVERY (vela 5) acabou de resolver → reseta sempre (WIN ou LOSS)
+          this.smartRecovery.resetLevel();
+          this._state.currentEntry = this.smartRecovery.getCurrentStake();
+          this._state.entryNumber = 1;
+          this._state.currentRecoveryStep = 0;
+          this._recoveryPhase = false;
+          this._anticipatedLoss = false;
+          this._isRecoveryTradePlaced = false;
+          this._pendingRecoveryTraceId = null;
+          this._sorosgaleTarget = null;
+          engineLogger.info(
+            "FlowRobot",
+            `🎯 Recovery (vela 5) encerrado com ${record.result} — quadrante resetado`,
+            {},
+          );
+        } else if (isWin) {
+          // Primário WIN → também reinicia o quadrante (novo ciclo na próxima vela)
+          this.smartRecovery.resetLevel();
+          this._state.currentEntry = this.smartRecovery.getCurrentStake();
+          this._state.entryNumber = 1;
+          this._state.currentRecoveryStep = 0;
+          this._anticipatedLoss = false;
+          this._isRecoveryTradePlaced = false;
+          this._pendingRecoveryTraceId = null;
+          this._sorosgaleTarget = null;
+          engineLogger.info("FlowRobot", "🎯 Primary WIN — quadrante resetado (novo ciclo)", {});
+        }
+        // Primário LOSS sem recovery resolvido: flags intactos de propósito.
+      }
     } catch (err) {
       this._state.activeOperation = null;
       this._state.status = "running";
@@ -2812,10 +3164,75 @@ export class FlowRobotEngine {
 
     const profile = this.state.config.operationProfile ?? "AUTO";
 
-    // Filter assets by profile: HYBRID_PROBABILITY only scans Puma hybrid assets
-    const scanAssets = profile === "HYBRID_PROBABILITY"
-      ? assets.filter((a) => HYBRID_PUMA_ASSETS.has(a.toUpperCase()))
-      : assets;
+    // ══ SOROSGALE MODE: forçar entrada no mesmo par/direção ══
+    if (this._sorosgaleTarget && profile === "HYBRID_PROBABILITY") {
+      const target = this._sorosgaleTarget;
+      engineLogger.info(
+        "FlowRobot",
+        `🎯 SOROSGALE SCAN: forçando ${target.asset} ${target.direction.toUpperCase()}`,
+        {},
+      );
+
+      // Scan apenas o alvo no timeframe do sorosgale
+      const targetAssets = [target.asset];
+      const targetTimeframes = [target.timeframe];
+
+      for (const asset of targetAssets) {
+        for (const tf of targetTimeframes) {
+          try {
+            const candles = await this.broker.getCandles(asset, tf, getFetchSize(profile));
+            if (!candles || candles.length < getMinCandles(profile)) continue;
+
+            const decision = this.decisionEngine.analyze(candles, asset, {
+              operationProfile: profile,
+              hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
+              timeframe: tf,
+            });
+
+            // No sorosgale, aceitar qualquer direção (mesmo que bloqueado)
+            // desde que tenha uma direção definida
+            if (decision.direction) {
+              const direction = decision.direction.toLowerCase() as "call" | "put";
+              // Forçar direção do sorosgale (mesma do trade anterior)
+              bestCandidate = {
+                asset,
+                direction: target.direction, // Força direção do target, não do decision
+                decision,
+                timeframe: tf,
+              };
+              engineLogger.info(
+                "FlowRobot",
+                `🎯 SOROSGALE CANDIDATE: ${asset} ${target.direction.toUpperCase()} (tf=${tf})`,
+                {},
+              );
+            }
+          } catch (e) {
+            engineLogger.error("FlowRobot", `Erro no sorosgale scan: ${asset} ${tf}`, { error: String(e) });
+          }
+        }
+      }
+
+      // Limpa o target após tentar
+      if (!bestCandidate) {
+        engineLogger.warn("FlowRobot", `🎯 SOROSGALE: ${target.asset} sem dados suficientes — limpando target`);
+        this._sorosgaleTarget = null;
+      }
+    }
+
+    // Filter assets by profile: HYBRID_PROBABILITY only scans selected hybrid asset
+    const scanAssets = !this._sorosgaleTarget
+      ? (profile === "HYBRID_PROBABILITY"
+        ? (() => {
+            const selected = this.hybridCatalogEngine.getSelectedAsset();
+            if (selected) {
+              // Usa apenas o ativo selecionado pelo catalog engine
+              return assets.filter((a) => a.toUpperCase() === selected.toUpperCase());
+            }
+            // Fallback: todos os híbridos se nenhum foi selecionado
+            return assets.filter((a) => HYBRID_PUMA_ASSETS.has(a.toUpperCase()));
+          })()
+        : assets)
+      : [];
 
     const totalCatalogTargets = scanAssets.length * timeframes.length;
     let scannedCount = 0;
@@ -2925,6 +3342,13 @@ export class FlowRobotEngine {
               hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
               timeframe: tf,
             });
+
+            // Armazena análise por par para o painel de catalogação
+            this._state.lastAnalysesByAsset = {
+              ...this._state.lastAnalysesByAsset,
+              [asset]: decision,
+            };
+
             latencyTracker.mark("score_calculated", "Score Calculated", {
               asset,
               tf,
@@ -3580,6 +4004,7 @@ export class FlowRobotEngine {
     this._state.status = "stopped";
     this._state.activeOperation = null;
     this._state.lastError = message;
+    this._sorosgaleTarget = null;
     this._emit("stopped-by-risk", undefined, message);
   }
 
@@ -3865,6 +4290,125 @@ export class FlowRobotEngine {
     }
     this._clearCountdown();
     this._stopBalanceRefresh();
+    this._clearAnticipationTimer();
+  }
+
+  private _clearAnticipationTimer(): void {
+    if (this._anticipationTimer) {
+      clearTimeout(this._anticipationTimer);
+      this._anticipationTimer = null;
+    }
+  }
+
+  /** Retorna o preço ao vivo mais recente do ativo (cache de tick ou candle). */
+  private async _getLivePrice(asset: string): Promise<number | null> {
+    const cached = this._priceCache[asset];
+    if (cached && cached.bid > 0 && Date.now() - cached.ts < 10000) return cached.bid;
+    try {
+      const candles = await this.broker.getCandles(asset, "M1", 1);
+      const last = candles[candles.length - 1];
+      if (last && last.close > 0) return last.close;
+    } catch {
+      /* ignora e cai no null */
+    }
+    return null;
+  }
+
+  /**
+   * ~5s antes do vencimento da vela 4, olha o preço ao vivo vs. o preço de
+   * abertura (referência do trade binário). Se claramente a caminho de LOSS,
+   * antecipa o recovery na vela 5 (sem esperar o resultado oficial, que chega
+   * ~2s APÓS a abertura da vela 5 e empurraria a entrada para a vela 6).
+   */
+  private async _runAnticipation(primaryOp: RobotOperation): Promise<void> {
+    if (this._state.status !== "running") return;
+    if (this._state.nextTrade) {
+      engineLogger.warn("FlowRobot", "ANTICIPATION: já existe nextTrade — abortando", {});
+      return;
+    }
+    const asset = primaryOp.asset;
+    const direction = primaryOp.direction;
+    const entryPrice = primaryOp.entryPrice;
+    const live = await this._getLivePrice(asset);
+    if (live == null) {
+      engineLogger.warn("FlowRobot", "ANTICIPATION: sem preço ao vivo — abortando", { asset });
+      return;
+    }
+    // Pequena margem para evitar falsos LOSS quando o preço está no limite
+    const buffer = Math.max(entryPrice * 0.0005, 1e-6);
+    let predictedLoss = false;
+    if (direction === "call") {
+      predictedLoss = live < entryPrice - buffer;
+    } else {
+      predictedLoss = live > entryPrice + buffer;
+    }
+    if (!predictedLoss) {
+      engineLogger.info(
+        "FlowRobot",
+        `ANTICIPATION: ${asset} ${direction} parece WIN (live=${live.toFixed(5)} vs entry=${entryPrice.toFixed(5)}) — sem recovery antecipado`,
+        {},
+      );
+      return;
+    }
+    engineLogger.info(
+      "FlowRobot",
+      `🎯 ANTICIPATION: ${asset} ${direction} previsto LOSS (live=${live.toFixed(5)} vs entry=${entryPrice.toFixed(5)}) — antecipando recovery na vela 5`,
+      {},
+    );
+    await this._placeAnticipatedRecovery(primaryOp);
+  }
+
+  /** Posiciona a trade de recovery na vela 5 usando o stake de recuperação. */
+  private async _placeAnticipatedRecovery(primaryOp: RobotOperation): Promise<void> {
+    try {
+      const asset = primaryOp.asset;
+      const direction = primaryOp.direction;
+      const recoveryStake = this.smartRecovery.peekRecoveryStake();
+      if (recoveryStake <= 0) return;
+      const expiration = primaryOp.expirationSeconds ?? 60;
+      const timeframe = primaryOp.timeframe ?? "M1";
+      const entryPrice = (await this._getLivePrice(asset)) ?? primaryOp.entryPrice;
+      const payout = await this.broker.getPayout(asset).catch(() => primaryOp.payout ?? 0.85);
+      const did = this._nextDecisionId();
+      const traceId = `tr_anticip_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const nowTs = Date.now();
+      const nextTrade: NextTrade = {
+        traceId,
+        decisionId: did,
+        symbol: asset,
+        direction,
+        score: 0,
+        amount: recoveryStake,
+        expiration,
+        entryPrice,
+        payout,
+        timeframe,
+        valid: true,
+        decidedAt: nowTs,
+        signalCandleTime: 0,
+        signalCandleOpen: primaryOp.entryPrice,
+        signalCandleClose: entryPrice,
+        candleId: `${asset}_${timeframe}_anticip_${nowTs}`,
+      };
+      this._isRecoveryTradePlaced = true;
+      this._recoveryPhase = true;
+      this._anticipatedLoss = true;
+      this._pendingRecoveryTraceId = traceId;
+      this.executionEngine.setNextTrade(nextTrade);
+      this._state.nextTrade = nextTrade;
+      this._state.currentEntry = recoveryStake;
+      this._state.entryNumber = 1;
+      this._state.currentRecoveryStep = 1;
+      this._logState("ANTICIPATED_RECOVERY_SET", { direction, stake: recoveryStake });
+      this._emit("state-changed");
+      engineLogger.info(
+        "FlowRobot",
+        `🎯 RECOVERY ANTECIPADO (vela 5): ${asset} ${direction.toUpperCase()} stake=${recoveryStake}`,
+        { decisionId: did, traceId },
+      );
+    } catch (e) {
+      engineLogger.error("FlowRobot", "Erro ao antecipar recovery", { error: String(e) });
+    }
   }
 
   private async _refreshBalance(): Promise<void> {
@@ -4000,6 +4544,7 @@ export class FlowRobotEngine {
       worstEntryPrecision: 0,
       executionPhase: "idle",
       healthCheck: null,
+      lastAnalysesByAsset: {},
     };
   }
 

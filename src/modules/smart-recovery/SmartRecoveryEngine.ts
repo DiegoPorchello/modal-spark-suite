@@ -317,6 +317,17 @@ export class SmartRecoveryEngine {
     };
   }
 
+  /** Stake da PRÓXIMA recuperação SEM mutar o estado (usado pela antecipação). */
+  peekRecoveryStake(): number {
+    const c = this.cfg();
+    const lvl = Math.min(
+      this.state.currentLevel + 1,
+      this.state.levelTable.length - 1,
+    );
+    const row = this.calculator.getLevelRow(lvl, this.state.levelTable);
+    return row ? row.entry1 : c.initialStake;
+  }
+
   getEntry(): SorosGaleEntry {
     const c = this.cfg();
     if (!this.state.levelTable || this.state.levelTable.length === 0) {
@@ -494,6 +505,19 @@ export class SmartRecoveryEngine {
     this.state = this.createInitialState();
     this.operationCounter = 0;
     this.emit("session.reset");
+  }
+
+  /** Reseta apenas o nível de recuperação (volta ao stake base) sem zerar
+   *  bancário, estatísticas de sessão nem daily loss. Usado quando a
+   *  tentativa de recovery (vela 5) encerra — seja WIN ou LOSS. */
+  resetLevel(): void {
+    this.state.currentLevel = 0;
+    this.state.consecutiveLosses = 0;
+    this.state.entryNumber = 1;
+    if (this.state.phase === "STOP" || this.state.phase === "FINALIZADO") {
+      this.state.phase = "IDLE";
+    }
+    this.emit("level.reset");
   }
 
   isStopped(): boolean {

@@ -56,6 +56,10 @@ export class SorosGaleCalculator {
     this.engine.registrarResultado("LOSS");
   }
 
+  registrarDraw(): void {
+    this.engine.registrarResultado("DRAW");
+  }
+
   reset(): void {
     this.engine.reset();
   }

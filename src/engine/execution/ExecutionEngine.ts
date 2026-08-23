@@ -11,6 +11,7 @@ export interface ExecutionCallbacks {
   onDecisionTime?: () => Promise<void>;
   onCandleOpen?: (time: number) => void;
   onEntry?: (record: EntryRecord) => void;
+  onEntryError?: (error: string, trade: NextTrade) => void;
   onPhaseChange?: (phase: ExecutionPhase) => void;
   onDelayDetected?: (reason: string) => void;
 }
@@ -435,10 +436,15 @@ export class ExecutionEngine {
       this._nextTrade = null;
     } catch (err) {
       this._pendingOrderCount = Math.max(0, this._pendingOrderCount - 1);
+      // Limpa a ordem pendente: se reenviássemos no próximo tick após uma
+      // falha de rede ambígua (ex.: timeout pós-envio), criaríamos duplicata.
+      this._nextTrade = null;
       engineLogger.error("ExecutionEngine", "Falha ao executar ordem na abertura", {
         error: String(err),
         symbol: trade.symbol,
+        traceId: trade.traceId,
       });
+      this._callbacks?.onEntryError?.(String(err), trade);
     }
 
     this._phase = "monitoring";

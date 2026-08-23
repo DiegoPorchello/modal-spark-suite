@@ -81,6 +81,8 @@ export interface HybridProbabilityConfigV2 {
   atrMin?: number;
   flowIndexMin?: number;
   probabilityWeight?: number;
+  useQuadrant?: boolean;
+  adxFilterMin?: number;
 }
 
 export const DEFAULT_HYBRID_PROBABILITY_CONFIG_V2: HybridProbabilityConfigV2 = {
@@ -93,6 +95,8 @@ export const DEFAULT_HYBRID_PROBABILITY_CONFIG_V2: HybridProbabilityConfigV2 = {
   ema200Enabled: true,
   flowIndexWindow: 20,
   historySize: 2000,
+  useQuadrant: false,
+  adxFilterMin: 15,
 };
 
 // ==========================================================================
@@ -146,6 +150,8 @@ export interface HybridProbabilityResult {
   signalStatus: SignalStatus;
   signalFilters: SignalFilterSnapshot[];
   candlesUsed: number;
+  /** Step atual do ciclo de 5 velas (1-5) */
+  cycleStep: number;
 }
 
 // ==========================================================================
@@ -442,19 +448,125 @@ function calcExhaustionScore(candles: Candle[]): ExhaustionResult {
 }
 
 // ==========================================================================
+// QUADRANTE PROBABILISTA — detecção de sequência + aceleração
+// ==========================================================================
+
+function detectSequence(candles: Candle[]): { length: number; color: CandleColor } {
+  const last = candleColor(candles[candles.length - 1]);
+  let length = 1;
+  for (let i = candles.length - 2; i >= 0; i--) {
+    if (candleColor(candles[i]) === last) length++;
+    else break;
+  }
+  return { length, color: last };
+}
+
+function detectAcceleration(candles: Candle[]): { accelerating: boolean; ratio: number } {
+  if (candles.length < 3) return { accelerating: true, ratio: 1 };
+  const body1 = Math.abs(candles[candles.length - 1].close - candles[candles.length - 1].open);
+  const body2 = Math.abs(candles[candles.length - 2].close - candles[candles.length - 2].open);
+  const ratio = body2 > 0 ? body1 / body2 : 1;
+  // Limite de aceleração relaxado para 1.02: o momentum passa em quase toda
+  // vela, deixando de bloquear a operação (apenas confirmando tendência).
+  return { accelerating: ratio > 1.02, ratio };
+}
+
+type QuadrantId = "Q1" | "Q2" | "Q3" | "Q4";
+
+function mapQuadrant(seqLen: number, accelerating: boolean): QuadrantId {
+  if (seqLen <= 3 && accelerating) return "Q1";
+  if (seqLen >= 4 && accelerating) return "Q2";
+  if (seqLen <= 3 && !accelerating) return "Q3";
+  return "Q4";
+}
+
+function calcQuadrantProbability(
+  quadrant: QuadrantId,
+  color: CandleColor,
+): { probability: number; direction: "CALL" | "PUT" } {
+  switch (quadrant) {
+    case "Q1": return { probability: 80, direction: color === "GREEN" ? "CALL" : "PUT" };
+    case "Q2": return { probability: 65, direction: color === "GREEN" ? "CALL" : "PUT" };
+    case "Q3": return { probability: 50, direction: color === "GREEN" ? "CALL" : "PUT" };
+    case "Q4": return { probability: 75, direction: color === "GREEN" ? "PUT" : "CALL" };
+  }
+}
+
+function quadrantLabel(q: QuadrantId, seqLen: number, accelerating: boolean): string {
+  const seq = seqLen <= 3 ? "Curta" : "Longa";
+  const accel = accelerating ? "Acelerando" : "Desacelerando";
+  return `${q} — Seq ${seq} (${seqLen}) + ${accel}`;
+}
+
+// ==========================================================================
 // V2 ENGINE (implementação completa com todos 5 módulos)
 // ==========================================================================
+
+// ── Estado do ciclo de 5 velas ──
+interface CycleState {
+  step: 0 | 1 | 2 | 3 | 4 | 5;
+  startCandleTime: number;
+  color: "GREEN" | "RED" | null;
+  lastCandleTime: number;
+}
 
 export class HybridProbabilityEngineV2 {
   private patternCatalog: PatternCatalogEngine;
   private probabilityDB: ProbabilityDatabaseService;
   private decisionScoreCalc: DecisionScoreCalculator;
+  private _cycle: CycleState = { step: 0, startCandleTime: 0, color: null, lastCandleTime: 0 };
+  // Entrada obrigatoriamente no candle 4 (ENTRADA). A recuperação após LOSS no
+  // candle 4 é feita pelo sorosgale na vela 5 (em flow-robot-engine), não aqui.
+  // O ciclo avança 1→5 a cada vela fechada, então o step 4 sempre é alcançado.
 
   constructor() {
     this.patternCatalog = new PatternCatalogEngine();
     this.patternCatalog.registerPattern(CONTINUITY_2C_PATTERN);
     this.probabilityDB = ProbabilityDatabaseService.getInstance();
     this.decisionScoreCalc = new DecisionScoreCalculator();
+  }
+
+  /**
+   * Retorna o estado atual do ciclo (para o painel consumir)
+   */
+  getCycleState(): { step: number; color: string | null } {
+    return { step: this._cycle.step, color: this._cycle.color };
+  }
+
+  /**
+   * Avança o ciclo para o próximo step. Chamado a cada nova vela fechada.
+   */
+  advanceCycle(candleTime: number, candleColor: "GREEN" | "RED"): void {
+    const lastTime = this._cycle.lastCandleTime;
+    if (candleTime <= lastTime) return; // mesma vela, ignora
+
+    if (this._cycle.step === 5) {
+      // Reinicia ciclo a partir desta vela
+      this._cycle = {
+        step: 1,
+        startCandleTime: candleTime,
+        color: candleColor,
+        lastCandleTime: candleTime,
+      };
+    } else {
+      this._cycle.step = (this._cycle.step + 1) as 0 | 1 | 2 | 3 | 4 | 5;
+      this._cycle.lastCandleTime = candleTime;
+      if (this._cycle.step === 1) {
+        this._cycle.color = candleColor;
+      }
+    }
+  }
+
+  /**
+   * Força reinício do ciclo (ex: após WIN/LOSS confirmado)
+   */
+  restartCycle(candleTime: number, candleColor: "GREEN" | "RED"): void {
+    this._cycle = {
+      step: 1,
+      startCandleTime: candleTime,
+      color: candleColor,
+      lastCandleTime: candleTime,
+    };
   }
 
   analyze(
@@ -480,8 +592,16 @@ export class HybridProbabilityEngineV2 {
     const minProb = config.minProbability ?? config.minScore ?? 65;
 
     console.log(
-      `[FLOW DIAG] V2 ===== HybridProbabilityEngine V2 INICIO ===== asset=${asset} tf=${timeframe} candles=${candles.length} weights={t:${tw},m:${mw},f:${fw},d:${dw},e:${ew}} minProb=${minProb}`,
+      `[FLOW DIAG] V2 ===== HybridProbabilityEngine V2 INICIO ===== asset=${asset} tf=${timeframe} candles=${candles.length} weights={t:${tw},m:${mw},f:${fw},d:${dw},e:${ew}} minProb=${minProb} useQuadrant=${config.useQuadrant ?? true}`,
     );
+
+    // ══ QUADRANT MODE: bypass completo do weighted average ══
+    // Este engine V2 É o modo quadrante; só cai no weighted se useQuadrant
+    // for explicitamente false (config persistida antiga). O padrão é true,
+    // para não depender de config salva em localStorage sem o campo.
+    if (config.useQuadrant !== false) {
+      return this.analyzeQuadrant(data, asset, timeframe, config, _start);
+    }
 
     if (data.length < 200) {
       return this.buildBlockedResult(asset, timeframe, [`EMA200 requer 200 candles. Recebidos: ${data.length}.`], config, performance.now() - _start, []);
@@ -625,6 +745,224 @@ export class HybridProbabilityEngineV2 {
       signalStatus,
       signalFilters,
       candlesUsed: data.length,
+      cycleStep: this._cycle.step,
+    };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // QUADRANT MODE — lógica pura de padrão de cor de vela
+  // ═══════════════════════════════════════════════════════════════════
+
+  private analyzeQuadrant(
+    data: Candle[],
+    asset: string,
+    timeframe: string,
+    config: HybridProbabilityConfigV2,
+    _start: number,
+  ): HybridProbabilityResult {
+    const minProb = config.minProbability ?? 65;
+    const adxMin = config.adxFilterMin ?? 15;
+
+    // ── Normaliza para a ÚLTIMA VELA FECHADA ──
+    // getCandles() inclui a vela em formação como último elemento. Analisar o
+    // corpo não finalizado faz o momentum parecer sempre fraco (nunca acelera),
+    // então o robô nunca entra. Descartamos velas ainda em formação
+    // (time + tf > agora) e usamos as fechadas — igual ao painel, que registra
+    // o passo no fechamento da vela.
+    const tfMs = /^M(\d+)$/.test(timeframe)
+      ? parseInt(/^M(\d+)$/.exec(timeframe)![1], 10) * 60000
+      : /^H(\d+)$/.test(timeframe)
+        ? parseInt(/^H(\d+)$/.exec(timeframe)![1], 10) * 3600000
+        : 60000;
+    const now = Date.now();
+    let ci = data.length - 1;
+    while (ci > 0 && data[ci].time + tfMs > now) ci--;
+    const d = data.slice(0, ci + 1);
+
+    console.log(
+      `[FLOW DIAG] V2 ===== QUADRANT MODE INICIO ===== asset=${asset} tf=${timeframe} candles=${data.length} closed=${d.length} adxMin=${adxMin} minProb=${minProb}`,
+    );
+
+    if (d.length < 3) {
+      return this.buildBlockedResult(asset, timeframe, ["Quadrant requer minimo 3 candles."], config, performance.now() - _start, []);
+    }
+
+    // 1. ADX — indicador VISUAL apenas. O cérebro da entrada é o MOMENTUM
+    // (aceleração); o ADX não bloqueia mais a operação, apenas é exibido.
+    const adx = calcADX(d);
+    if (adx < adxMin) {
+      console.log(
+        `[FLOW DIAG] V2 ===== ADX BAIXO (${adx.toFixed(1)} < ${adxMin}) — NAO BLOQUEIA; decisao por momentum/quadrante =====`,
+      );
+    }
+
+    // 2. CICLO DETERMINÍSTICO de 5 velas — ancorado no FECHAMENTO das velas,
+    //    NÃO em contador mutável (que dessincroniza com a cadência do scan e
+    //    fazia o robô entrar na 3ª vela em vez da 4ª).
+    //    Passo = posição da vela no ciclo de 5, derivado do horário de fechamento.
+    //    Isso GARANTE que a entrada ocorra EXATAMENTE na 4ª vela do quadrante,
+    //    independente de quantas vezes o scan roda por vela.
+    const CYCLE_LEN = 5;
+    const lastCandle = d[d.length - 1];
+    const lastColor: "GREEN" | "RED" = lastCandle.close >= lastCandle.open ? "GREEN" : "RED";
+
+    // posição (0-based: 0..4) da última vela fechada dentro do ciclo de 5,
+    // ancorada no epoch (funciona para qualquer timeframe M/H de forma determinística).
+    const posInCycle = ((Math.floor(lastCandle.time / tfMs) % CYCLE_LEN) + CYCLE_LEN) % CYCLE_LEN;
+    const currentStep = (posInCycle + 1) as 1 | 2 | 3 | 4 | 5; // 1..5
+
+    // 1ª vela do quadrante = `posInCycle` candles antes da última (candle de INICIO).
+    // A cor dessa 1ª vela define a DIREÇÃO da entrada (CALL se verde, PUT se vermelha).
+    const firstIdx = Math.max(0, d.length - 1 - posInCycle);
+    const firstCandle = d[firstIdx];
+    const firstColor: "GREEN" | "RED" = firstCandle.close >= firstCandle.open ? "GREEN" : "RED";
+
+    console.log(
+      `[FLOW DIAG] V2 ===== CICLO ===== step=${currentStep} (time=${new Date(lastCandle.time).toISOString()}) color=${lastColor} primeiraVelaCor=${firstColor}`,
+    );
+
+    // 3. Detectar sequência (Eixo X) — sobre velas fechadas
+    const seq = detectSequence(d);
+
+    // 4. Detectar aceleração (Eixo Y) — sobre velas fechadas
+    const accel = detectAcceleration(d);
+
+    // 5. Mapear quadrante
+    const quadrant = mapQuadrant(seq.length, accel.accelerating);
+
+    // 6. Calcular probabilidade (quadrante) — a direção vem da COR DA 1ª VELA
+    //    do quadrante (regra do usuário: "entra na 4ª vela, direção = cor da 1ª").
+    const { probability } = calcQuadrantProbability(quadrant, seq.color);
+    const direction: "CALL" | "PUT" = firstColor === "GREEN" ? "CALL" : "PUT";
+
+    // 7. Classificação
+    let level: HybridProbabilityLevel;
+    if (probability >= 80) level = "Excelente";
+    else if (probability >= 70) level = "Forte";
+    else if (probability >= minProb) level = "Boa";
+    else level = "Bloqueado";
+
+    // ══ ENTRADA: obrigatoriamente no candle 4 (step === 4) ══
+    // Regras do usuário:
+    //  - Entrada SÓ no candle 4 (ENTRADA). O ciclo de 5 velas é o gate rígido.
+    //  - ADX não bloqueia (apenas exibido).
+    //  - Momentum (aceleração) com limite relaxado p/ 1.02: passa quase sempre,
+    //    deixando de ser bloqueio real (apenas confirma tendência).
+    //  - Recuperação após LOSS no candle 4 é feita pelo sorosgale na vela 5
+    //    (flow-robot-engine), fora deste engine.
+    //  - TIMING: a entrada acontece na ABERTURA da 4ª vela. Como a decisão é
+    //    calculada sobre a vela FECHADA, ela deve ser tomada ao fechar a 3ª vela
+    //    (currentStep === 3) — assim o trade é enviado na abertura da 4ª. Se
+    //    esperássemos currentStep === 4, a abertura da 4ª já teria passado e o
+    //    robô nunca entraria (deadlock).
+    const momentumOk = accel.accelerating; // informativo (limite 1.02)
+    const stepOk = currentStep === 3; // decide na 3ª fechada → entra na 4ª
+    const entryCandleStep = 4; // vela-alvo da entrada (p/ exibição)
+    // Entrada OBRIGATÓRIA no candle 4: a ÚNICA condição real de bloqueio é a
+    // janela de entrada (candle 3 fechado). ADX, momentum e probabilidade do
+    // quadrante são informativos e NÃO bloqueiam a entrada neste candle —
+    // caso contrário o candle de entrada (3ª do quadrante) raramente passaria
+    // no filtro de probabilidade (Q3 = 50%) e o robô nunca entraria.
+    const canOperate = stepOk;
+    const status: HybridProbabilityStatus = canOperate ? "liberado" : "bloqueado";
+    const treeLabel = quadrantLabel(quadrant, seq.length, accel.accelerating);
+
+    const blockedReasons: string[] = [];
+    if (!stepOk) {
+      blockedReasons.push(`Decisão de entrada ocorre ao fechar a 3ª vela (step atual ${currentStep}) — aguardando a 3ª para entrar na 4ª`);
+    }
+
+    console.log(
+      `[FLOW DIAG] V2 ===== QUADRANT RESULT ===== step=${currentStep} stepOk=${stepOk} momentumOk=${momentumOk} ratio=${accel.ratio.toFixed(2)} prob=${probability} quadrant=${quadrant} seq=${seq.length} color=${seq.color} direction=${direction} status=${status} adx=${adx.toFixed(1)}`,
+    );
+
+    engineLogger.info("HybridProbability V2 (Quadrant)", "===== QUADRANT BREAKDOWN =====", {
+      asset,
+      quadrant,
+      sequenceLength: seq.length,
+      sequenceColor: seq.color,
+      accelerating: accel.accelerating,
+      accelerationRatio: accel.ratio,
+      adx,
+      probability,
+      direction,
+      status,
+    });
+
+    const filters: HybridProbabilityFilterScore[] = [
+      { id: "adx", name: "ADX", maxPoints: 100, points: Math.round(adx), passed: adx >= adxMin, detail: `ADX ${adx.toFixed(1)} (min ${adxMin})` },
+      { id: "sequence", name: "Sequencia", maxPoints: 10, points: seq.length, passed: seq.length >= 2, detail: `${seq.length} velas ${seq.color}` },
+      { id: "acceleration", name: "Aceleracao", maxPoints: 100, points: Math.round(Math.min(accel.ratio, 2) * 50), passed: accel.accelerating, detail: `Ratio ${accel.ratio.toFixed(2)} (${accel.accelerating ? "acelerando" : "desacelerando"})` },
+      { id: "quadrant", name: "Quadrante", maxPoints: 100, points: probability, passed: canOperate, detail: treeLabel },
+    ];
+
+    const treeNodes: DecisionTreeNode[] = [
+      { label: `Quadrante: ${treeLabel}`, status: canOperate ? "pass" : "fail", detail: `Probabilidade: ${probability}%` },
+      { label: `Direcao: ${direction} | Cor: ${seq.color} | ADX: ${adx.toFixed(1)}`, status: canOperate ? "pass" : "fail" },
+      { label: `Resultado: ${status.toUpperCase()} (${probability}% >= ${minProb}%)`, status: canOperate ? "pass" : "fail" },
+    ];
+
+    const technicalScore: TechnicalScore = {
+      total: probability,
+      breakdown: { trend: 0, structure: 0, priceAction: probability, smartMoney: 0, momentum: Math.round(accel.ratio * 50) },
+      classification: level,
+    };
+
+    const probabilityScore: ProbabilityScore = {
+      total: probability,
+      breakdown: { winRate: 0, occurrences: 0, confidence: "baixa", patternWinrate: 0, overallWinrate: 0 },
+      weight: 1.0,
+    };
+
+    const decisionScore: DecisionScore = {
+      total: probability,
+      technical: technicalScore,
+      probability: probabilityScore,
+      formula: `Quadrante(${quadrant}) Seq(${seq.length}) x Acel(${accel.accelerating ? "ALTO" : "BAIXO"}) = ${probability}%`,
+      classification: level,
+    };
+
+    const confidenceScore = canOperate ? Math.min(95, 60 + Math.round(probability - minProb)) : 0;
+
+    const reason = canOperate
+      ? `LIBERADO — Quadrante ${quadrant} | Prob ${probability}% | Dir ${direction} | Seq ${seq.length} ${seq.color} | ${accel.accelerating ? "Acelerando" : "Desacelerando"} | ADX ${adx.toFixed(1)} | entra na 4ª vela (decidido ao fechar a 3ª)`
+      : `BLOQUEADO — ${!stepOk ? `decidirá ao fechar a 3ª (step atual ${currentStep}) | ` : ""}${quadrant} prob ${probability}% ${probability < minProb ? `< ${minProb}%` : ""} | momentum ${momentumOk ? "OK" : "FRACO"}`;
+
+    const signalStatus: SignalStatus = canOperate ? "APPROVED" : "TECHNICAL_REJECTION";
+
+    const processingTimeMs = performance.now() - _start;
+
+    return {
+      asset,
+      timeframe,
+      setup: { detected: seq.length >= 2, color: seq.color, direction },
+      indicators: { adx, ema200: null, atr: 0, atrBaseline: 0, flowIndex: 0 },
+      filters,
+      technicalScore,
+      probabilityScore,
+      decisionScore,
+      score: probability,
+      level,
+      status,
+      direction,
+      confidence: confidenceScore,
+      reason,
+      blockedReasons,
+      historicalPatterns: 0,
+      historicalWinrate: null,
+      processingTimeMs,
+      decisionTree: { label: `Signal: ${signalStatus}`, status: canOperate ? "pass" : "fail", children: treeNodes },
+      signalStatus,
+      signalFilters: filters.map((f) => ({
+        id: f.id,
+        name: f.name,
+        passed: f.passed,
+        points: f.points,
+        maxPoints: f.maxPoints,
+        detail: f.detail,
+      })),
+      candlesUsed: d.length,
+      cycleStep: stepOk ? entryCandleStep : currentStep,
     };
   }
 
@@ -664,6 +1002,7 @@ export class HybridProbabilityEngineV2 {
       signalStatus: blockedStatus,
       signalFilters: [],
       candlesUsed: 0,
+      cycleStep: this._cycle.step,
     };
   }
 }
@@ -785,6 +1124,7 @@ export class HybridProbabilityEngine {
       signalStatus,
       signalFilters,
       candlesUsed: data.length,
+      cycleStep: 0,
     };
   }
 
@@ -827,6 +1167,7 @@ export class HybridProbabilityEngine {
       signalStatus: blockedStatus,
       signalFilters: [],
       candlesUsed: 0,
+      cycleStep: 0,
     };
   }
 }

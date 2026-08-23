@@ -21,7 +21,7 @@ import { advisorHistory } from "../modules/advisor/services/advisor-history";
 import { MarketProfileCard } from "../modules/market/components";
 import { OperationalProfileSelector } from "../components/operational-profile-selector/OperationalProfileSelector";
 import { HybridProbabilityPanel } from "../components/hybrid-probability/HybridProbabilityPanel";
-import { ExperimentsPanel } from "../components/experiments/ExperimentsPanel";
+
 import { LiveIntelligencePanel } from "../modules/live-intelligence/LiveIntelligencePanel";
 import { loadCore } from "../modules/market/cores";
 import { StrategyLifecycleCard } from "../modules/lifecycle/components/StrategyLifecycleCard";
@@ -48,6 +48,7 @@ import {
   Bell,
   Maximize2,
   Minimize2,
+  Minus,
   User,
   Check,
   Circle,
@@ -81,6 +82,7 @@ import {
 } from "lucide-react";
 import { CriticalErrorModal } from "../components/ui/CriticalErrorModal";
 import { CopyTradeModal } from "../components/copy-trader/CopyTradeModal";
+import { PumaBrokerModal } from "../components/puma-broker/PumaBrokerModal";
 import { MetricCard } from "../components/ui/MetricCard";
 import { ModuleStatus } from "../components/ui/ModuleStatus";
 import { TabNav, type TabDef } from "../components/ui/TabNav";
@@ -119,7 +121,6 @@ type NavKey =
   | "backtest"
   | "puma"
   | "config"
-  | "experiments"
   | "ajuda";
 
 type NavIcon = React.ComponentType<{ className?: string }>;
@@ -145,10 +146,6 @@ const NAV: { section: string; items: { key: NavKey; label: string; icon: NavIcon
     items: [{ key: "calc", label: "Calculadora Sorosgale", icon: Calculator }],
   },
   { section: "BACKTEST", items: [{ key: "backtest", label: "Simulador", icon: FlaskConical }] },
-  {
-    section: "EXPERIMENTOS",
-    items: [{ key: "experiments", label: "Experimentos", icon: FlaskConical }],
-  },
   { section: "INTEGRAÇÕES", items: [{ key: "puma", label: "Puma Broker", icon: Plug }] },
   { section: "CONFIGURAÇÕES", items: [{ key: "config", label: "Configurações", icon: Settings }] },
   { section: "AJUDA", items: [{ key: "ajuda", label: "Suporte", icon: HelpCircle }] },
@@ -199,6 +196,7 @@ function Dashboard() {
     import("../modules/flow-continuity/types/replay-context.types").ReplayContext | null
   >(null);
   const [copyTradeOpen, setCopyTradeOpen] = useState(false);
+  const [pumaBrokerOpen, setPumaBrokerOpen] = useState(false);
   const [assetConfigModalOpen, setAssetConfigModalOpen] = useState(false);
   const {
     connected,
@@ -695,6 +693,7 @@ function Dashboard() {
       />
       {/* Copy Trade Modal */}
       <CopyTradeModal open={copyTradeOpen} onClose={() => setCopyTradeOpen(false)} />
+      <PumaBrokerModal open={pumaBrokerOpen} onClose={() => setPumaBrokerOpen(false)} />
       {/* Sidebar */}
       <aside className="w-64 shrink-0 bg-sidebar border-r border-border flex flex-col">
         <div className="px-5 py-5 border-b border-border flex items-center gap-3">
@@ -722,6 +721,7 @@ function Dashboard() {
                 const Icon = it.icon;
                 const isActive = active === it.key;
                 const isCopyTrade = it.key === "copytrade";
+                const isPuma = it.key === "puma";
       return (
           <button
             key={it.key}
@@ -730,6 +730,8 @@ function Dashboard() {
                 setCopyTradeOpen(true);
               } else if (it.key === "config-ativos") {
                 setAssetConfigModalOpen(true);
+              } else if (isPuma) {
+                setPumaBrokerOpen(true);
               } else {
                 setActive(it.key);
               }
@@ -1220,8 +1222,7 @@ function Dashboard() {
           {/* ═══ NEXOR AI V2 — LIVE INTELLIGENCE ═══ */}
           <LiveIntelligencePanel />
 
-          {/* ═══ EXPERIMENT FRAMEWORK — PHASE XXIV ═══ */}
-          <ExperimentsPanel />
+
 
           {/* ═══ DASHBOARD (VISÃO GERAL) — Monitoramento em tempo real ═══ */}
 
@@ -3571,6 +3572,8 @@ function NewOperationModal({
 }) {
   const { engine, state: robotState } = useRobot();
   const [remainingTime, setRemainingTime] = useState<number>(0);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
   const countdownInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -3622,14 +3625,50 @@ function NewOperationModal({
   const totalLatency =
     (activeOperation.profit ?? 0) > 0 ? (activeOperation.profit / activeOperation.amount) * 100 : 0;
 
+  // Minimized view
+  if (isMinimized) {
+    return (
+      <div className="fixed bottom-4 right-4 z-50">
+        <button
+          onClick={() => setIsMinimized(false)}
+          className="flex items-center gap-3 px-4 py-3 bg-card border border-border rounded-lg shadow-2xl hover:bg-accent/50 transition-colors"
+        >
+          <div className={`size-2 rounded-full ${isActive ? "bg-warning animate-pulse" : isSuccessful ? "bg-success" : "bg-danger"}`} />
+          <div className="text-left">
+            <div className="text-xs font-bold">{activeOperation.asset} {activeOperation.direction.toUpperCase()}</div>
+            <div className="text-[10px] text-muted-foreground">R${(activeOperation.amount || 0).toFixed(2)} • Clique para expandir</div>
+          </div>
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm">
-      <div className="panel w-[420px] p-5 shadow-2xl glow-success">
+    <div className={`fixed inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm ${isExpanded ? "p-4" : ""}`}>
+      <div className={`panel p-5 shadow-2xl glow-success transition-all duration-200 ${
+        isExpanded ? "w-full max-w-4xl h-[85vh] overflow-y-auto" : "w-[420px]"
+      }`}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-sm font-bold tracking-wide">LIVE OPERATION</h3>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-            <X className="size-4" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setIsMinimized(true)}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-accent/50 text-muted-foreground hover:text-foreground transition-colors"
+              title="Minimizar"
+            >
+              <Minus className="size-3.5" />
+            </button>
+            <button
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="w-7 h-7 flex items-center justify-center rounded hover:bg-accent/50 text-muted-foreground hover:text-foreground transition-colors"
+              title={isExpanded ? "Restaurar" : "Expandir"}
+            >
+              {isExpanded ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+            </button>
+            <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded hover:bg-danger/20 text-muted-foreground hover:text-danger transition-colors" title="Fechar">
+              <X className="size-3.5" />
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-3 gap-3 mb-4">
