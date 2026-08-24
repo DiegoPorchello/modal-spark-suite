@@ -439,6 +439,9 @@ export class FlowRobotEngine {
     open: number;
     last: number;
     updated: number;
+    /** Origem do dado: "candle" = OHLC real do gráfico (autoridade);
+     *  "ticks" = preços ao vivo (sujeito a ticks escassos → doji falso). */
+    source: "ticks" | "candle";
   } | null = null;
 
   /** Unsubscribe das atualizações da vela em formação (fonte primária da cor). */
@@ -454,6 +457,10 @@ export class FlowRobotEngine {
   // traceId do recovery atualmente em voo (vela 5) — identifica qual registro
   // resolve o ciclo; enquanto existir, um LOSS do primário NÃO reseta flags.
   private _pendingRecoveryTraceId: string | null = null;
+  // direção da operação FONTE da predição em voo — usada na reconciliação de
+  // abertura para deduzir WIN/LOSS real pela cor da vela fechada e corrigir
+  // stake/flags ANTES do envio (loss real nunca pode sair com stake SOROS).
+  private _pendingRecoverySourceDir: "call" | "put" | null = null;
   private static readonly MAX_OPERATION_HISTORY = 100;
   private _lastReplayContext: ReplayContext | null = null;
   private _replayHistory: ReplayContext[] = [];
@@ -745,6 +752,7 @@ export class FlowRobotEngine {
         open: candle.open,
         last: candle.close,
         updated: Date.now(),
+        source: "candle",
       };
     });
 
@@ -891,6 +899,7 @@ export class FlowRobotEngine {
     this._recoveryPhase = false;
     this._isRecoveryTradePlaced = false;
     this._pendingRecoveryTraceId = null;
+    this._pendingRecoverySourceDir = null;
     this._priceCache = {};
     this._state.status = "stopped";
     this._state.activeOperation = null;
@@ -948,6 +957,7 @@ export class FlowRobotEngine {
     this._recoveryPhase = false;
     this._isRecoveryTradePlaced = false;
     this._pendingRecoveryTraceId = null;
+    this._pendingRecoverySourceDir = null;
     this._priceCache = {};
     const config = this._state.config;
     this.smartRecovery.reset();
@@ -1870,27 +1880,40 @@ export class FlowRobotEngine {
         : null;
     if (queued?.valid) {
       if (!tr) {
+        const motivo = !trackerRaw
+          ? "sem_ticks"
+          : trackerRaw.minuteStart !== prevStart
+            ? "minuto_divergente"
+            : "ticks_velhos";
+        const idade = trackerRaw ? Date.now() - trackerRaw.updated : -1;
         console.log(
-          `[CONTINUITY] CANDLE_OPEN_RECONCILE SKIP traceId=${queued.traceId} motivo=${!trackerRaw ? "sem_ticks" : trackerRaw.minuteStart !== prevStart ? "minuto_divergente" : "ticks_velhos"} mantendo=${queued.direction}`,
+          `[CONTINUITY] CANDLE_OPEN_RECONCILE SKIP traceId=${queued.traceId} motivo=${motivo} fonte=${trackerRaw?.source ?? "-"} idade=${idade}ms mantendo=${queued.direction}/${queued.amount}`,
         );
-      } else if (tr.open === tr.last) {
-        // Vela anterior fechou doji → PULA esta vela
+      } else if (tr.open === tr.last && tr.source === "candle") {
+        // Vela anterior fechou DOJI REAL (OHLC do gráfico) → PULA esta vela
         this.executionEngine.clearNextTrade();
         this._state.nextTrade = null;
         engineLogger.warn(
           "FlowRobot",
-          `[CONTINUIDADE] Vela anterior fechou doji (tick open=last=${tr.open}) — entrada cancelada, pulando vela`,
+          `[CONTINUIDADE] Vela anterior fechou doji (OHLC open=close=${tr.open}) — entrada cancelada, pulando vela`,
           { traceId: queued.traceId },
         );
         console.log(
           `[CONTINUITY] CANDLE_OPEN_RECONCILE motivo=DOJI_SKIP traceId=${queued.traceId} candle=${new Date(prevStart).toISOString()}`,
+        );
+      } else if (tr.open === tr.last) {
+        // open===last vindo só de TICKS = minuto com preço único (ticks
+        // escassos) — NÃO é doji real. Não inventa direção nem pula a vela:
+        // mantém direção e valor enfileirados e envia normalmente.
+        console.log(
+          `[CONTINUITY] CANDLE_OPEN_RECONCILE SKIP traceId=${queued.traceId} motivo=ticks_sem_definicao mantendo=${queued.direction}/${queued.amount}`,
         );
       } else {
         const expected: "call" | "put" = tr.last > tr.open ? "call" : "put";
         console.log(
           `[CONTINUITY] CANDLE_OPEN_RECONCILE prevCandle=${new Date(prevStart).toISOString()} tickOpen=${tr.open} tickLast=${tr.last} expected=${expected} queued=${queued.direction}`,
         );
-        this._flipQueuedDirection(expected);
+        this._reconcileQueuedEntry(expected);
       }
     }
 
@@ -1911,46 +1934,69 @@ export class FlowRobotEngine {
   }
 
   /**
-   * Garante que a trade enfileirada siga a direção esperada ("cor da última
-   * vela fechada"). Se divergir, inverte direção + valor + flags de predição.
+   * Garante que a trade enfileirada siga a regra "cor da última vela fechada"
+   * ANTES do envio, tanto em DIREÇÃO quanto em FINANCEIRO:
+   *
+   * - Fila de predição (antecipação T-10s): o resultado REAL da operação fonte
+   *   é deduzido comparando a cor da vela fechada com a DIREÇÃO DA FONTE —
+   *   não com o palpite original. Loss real → próximo nível / entry 1
+   *   (peekRecoveryStake); win real → SOROS / reset (peekAfterWinStake).
+   *   Isso impede o bug de a entrada pós-loss sair com stake de 2ª entrada.
+   * - Demais filas: apenas enforcement de direção.
    */
-  private _flipQueuedDirection(expected: "call" | "put"): void {
+  private _reconcileQueuedEntry(expected: "call" | "put"): void {
     const queued = this.executionEngine.nextTrade;
     if (!queued?.valid || !this._state.nextTrade) return;
-    if (queued.direction === expected) return;
 
-    const oldDir = queued.direction;
     const isPredictionQueue =
       this._pendingRecoveryTraceId !== null &&
       this._pendingRecoveryTraceId === queued.traceId;
-    const wasPredictedLoss = isPredictionQueue && this._anticipatedLoss;
+    const sourceDir = this._pendingRecoverySourceDir;
+    const oldDir = queued.direction;
+    const oldAmount = queued.amount;
 
-    if (isPredictionQueue) {
-      // Predição invertida → stake e flags invertem junto
-      const newStake = wasPredictedLoss
+    if (isPredictionQueue && sourceDir) {
+      // ══ AUTORIDADE: cor da vela fechada vs direção da fonte ══
+      const sourceWon = expected === sourceDir;
+      const newStake = sourceWon
         ? this.smartRecovery.peekAfterWinStake()
         : this.smartRecovery.peekRecoveryStake();
       if (newStake > 0) queued.amount = newStake;
-      this._anticipatedLoss = !wasPredictedLoss;
-      this._recoveryPhase = !wasPredictedLoss;
-      this._isRecoveryTradePlaced = !wasPredictedLoss;
+      this._anticipatedLoss = !sourceWon;
+      this._recoveryPhase = !sourceWon;
+      this._isRecoveryTradePlaced = !sourceWon;
+
+      if (oldAmount !== queued.amount || oldDir !== expected) {
+        engineLogger.warn(
+          "FlowRobot",
+          `[CONTINUIDADE] Reconciliação predição→real: fonte ${sourceDir.toUpperCase()} ${sourceWon ? "WIN" : "LOSS"} (vela ${expected.toUpperCase()}) stake ${oldAmount} → ${queued.amount}, dir ${oldDir?.toUpperCase()} → ${expected.toUpperCase()}`,
+          { traceId: queued.traceId, level: this.smartRecovery.getState().currentLevel },
+        );
+        this._logState("PREDICTION_RECONCILED", {
+          traceId: queued.traceId,
+          sourceDir,
+          sourceWon,
+          from: oldDir,
+          to: expected,
+          oldAmount,
+          amount: queued.amount,
+        });
+      }
     }
 
-    queued.direction = expected;
+    if (queued.direction !== expected) {
+      queued.direction = expected;
+      if (!isPredictionQueue || !sourceDir) {
+        engineLogger.warn(
+          "FlowRobot",
+          `[CONTINUIDADE] Direção reconciliada na abertura: ${oldDir?.toUpperCase()} → ${expected.toUpperCase()} stake=${queued.amount}`,
+          { traceId: queued.traceId },
+        );
+      }
+    }
+
     this._state.currentEntry = queued.amount;
-    this._logState("DIRECTION_RECONCILED", {
-      traceId: queued.traceId,
-      from: oldDir,
-      to: expected,
-      amount: queued.amount,
-      predictionQueue: isPredictionQueue,
-    });
     this._emit("state-changed");
-    engineLogger.warn(
-      "FlowRobot",
-      `[CONTINUIDADE] Direção reconciliada na abertura: ${oldDir?.toUpperCase()} → ${expected.toUpperCase()} stake=${queued.amount}`,
-      { traceId: queued.traceId },
-    );
   }
 
   /**
@@ -1962,11 +2008,35 @@ export class FlowRobotEngine {
   private async _queueGapFillEntry(): Promise<void> {
     try {
       const asset = this._state.config.asset;
-      const direction = this._formingTickColor();
+      let direction = this._formingTickColor();
+      if (!direction) {
+        // Fallback: cor da ÚLTIMA VELA FECHADA via REST (histórico). Evita
+        // perder a vela quando os ticks da vela em formação estão escassos
+        // (open===last) ou ausentes — regra "continuidade" preservada.
+        try {
+          const candles = await this.broker.getCandles(asset, "M1", 3);
+          const lastClosed = candles.length > 0 ? candles[candles.length - 1] : null;
+          if (
+            lastClosed &&
+            lastClosed.open > 0 &&
+            lastClosed.close > 0 &&
+            lastClosed.close !== lastClosed.open
+          ) {
+            direction = lastClosed.close > lastClosed.open ? "call" : "put";
+            engineLogger.info(
+              "FlowRobot",
+              `[GAP-FILL] Cor da vela em formação indefinida — usando última vela fechada: ${direction.toUpperCase()}`,
+              { asset, candleTime: new Date(lastClosed.time).toISOString() },
+            );
+          }
+        } catch {
+          /* fallback REST falhou — mantém direction=null */
+        }
+      }
       if (!direction) {
         engineLogger.warn(
           "FlowRobot",
-          "[GAP-FILL] Sem cor definida nos ticks — vela ficará sem entrada",
+          "[GAP-FILL] Sem cor definida nos ticks nem no histórico — vela ficará sem entrada",
           { asset },
         );
         return;
@@ -4242,10 +4312,17 @@ export class FlowRobotEngine {
         const ts = rawTs > 0 && rawTs < 1e12 ? rawTs * 1000 : rawTs;
         const minute = Math.floor(ts / 60000) * 60000;
         if (!this._tickTracker || this._tickTracker.minuteStart !== minute) {
-          this._tickTracker = { minuteStart: minute, open: px, last: px, updated: Date.now() };
+          this._tickTracker = {
+            minuteStart: minute,
+            open: px,
+            last: px,
+            updated: Date.now(),
+            source: "ticks",
+          };
         } else {
           this._tickTracker.last = px;
           this._tickTracker.updated = Date.now();
+          this._tickTracker.source = "ticks";
         }
       }
     });
@@ -4299,8 +4376,35 @@ export class FlowRobotEngine {
           return;
         }
 
+        // ══ TRAVA DE DADOS VIVOS ══
+        // Só migra se o par candidato tem stream/buffer ativo. Híbridos não
+        // recebem prefill da Binance (HYBRID_THRESHOLD=200 velas via WS) —
+        // migrar para um par sem dados mata a antecipação, o gap-fill e a
+        // análise: o robô para de entrar completamente.
+        const buf = this.broker
+          .getBufferStatus()
+          .find((b) => b.key.toUpperCase() === novoAsset.toUpperCase());
+        const bufCount = buf?.count ?? 0;
+        const dadosVivos = bufCount >= 200 && !!buf?.lastClose;
+        if (!dadosVivos) {
+          engineLogger.warn(
+            "FlowRobot",
+            `🔄 RE-CATALOGAÇÃO: migração para ${novoAsset} ADIADA — buffer sem dados vivos (${bufCount}/200 velas). Mantendo ${assetAnterior}.`,
+            { candidate: novoAsset, bufferCount: bufCount },
+          );
+          this._emitDiaryEntry(
+            `Re-catalogação: ${novoAsset} é o par mais assertivo, mas está sem dados vivos (buffer ${bufCount}/200). Mantendo ${assetAnterior} até o buffer aquecer.`,
+            "⏳",
+            "warning",
+          );
+          // Re-pinia o catálogo no par atual para o scan continuar operando nele
+          this.hybridCatalogEngine.selectAsset(assetAnterior);
+          return;
+        }
+
         // Migra o robô para o novo par (ciclo de velas é reiniciado pelo catálogo)
         this._cancelQueuedIfUnsent(`re-catalogação: migração de ${assetAnterior} para ${novoAsset}`);
+        this.broker.subscribeAsset(novoAsset);
         this._state.config.asset = novoAsset;
         this.assetCooldowns.delete(assetAnterior);
         this.assetCooldowns.delete(novoAsset);
@@ -4493,6 +4597,7 @@ export class FlowRobotEngine {
     this._recoveryPhase = false;
     this._isRecoveryTradePlaced = false;
     this._pendingRecoveryTraceId = null;
+    this._pendingRecoverySourceDir = null;
   }
 
   /**
@@ -4586,7 +4691,7 @@ export class FlowRobotEngine {
    * Enfileira a próxima entrada (abertura da vela seguinte) com base na
    * predição T-10s: valor pós-win ou próximo nível, e a cor prevista da vela.
    * A direção enfileirada é reconciliada na abertura contra os ticks reais
-   * (_onExecutionCandleOpen → _flipQueuedDirection), garantindo a regra
+   * (_onExecutionCandleOpen → _reconcileQueuedEntry), garantindo a regra
    * "cor da última vela fechada" mesmo se a predição falhar.
    */
   private async _queueNextEntry(
@@ -4639,6 +4744,7 @@ export class FlowRobotEngine {
         this._anticipatedLoss = true;
       }
       this._pendingRecoveryTraceId = traceId;
+      this._pendingRecoverySourceDir = primaryOp.direction;
       this.executionEngine.setNextTrade(nextTrade);
       this._state.nextTrade = nextTrade;
       this._state.currentEntry = stake;
