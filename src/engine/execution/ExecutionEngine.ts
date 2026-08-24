@@ -17,7 +17,10 @@ export interface ExecutionCallbacks {
 }
 
 const CHECK_INTERVAL_MS = 50;
-const DECISION_ADVANCE_MS = 200;
+// Janela de decisão ANTES do fechamento da vela. Precisa cobrir o custo de
+// getCandles + análise (~centenas de ms via daemon): se a decisão terminar
+// depois da abertura, o nextTrade nasce tarde e a vela passa sem entrada.
+const DECISION_ADVANCE_MS = 1500;
 const MAX_LATENCY_WARN_MS = 300;
 
 /**

@@ -780,45 +780,43 @@ export class HybridProbabilityEngineV2 {
     const d = data.slice(0, ci + 1);
 
     console.log(
-      `[FLOW DIAG] V2 ===== QUADRANT MODE INICIO ===== asset=${asset} tf=${timeframe} candles=${data.length} closed=${d.length} adxMin=${adxMin} minProb=${minProb}`,
+      `[FLOW DIAG] V2 ===== MODO CONTINUO INICIO ===== asset=${asset} tf=${timeframe} candles=${data.length} closed=${d.length} minProb=${minProb}`,
     );
 
     if (d.length < 3) {
-      return this.buildBlockedResult(asset, timeframe, ["Quadrant requer minimo 3 candles."], config, performance.now() - _start, []);
+      return this.buildBlockedResult(asset, timeframe, ["Continuidade requer minimo 3 candles."], config, performance.now() - _start, []);
     }
 
-    // 1. ADX — indicador VISUAL apenas. O cérebro da entrada é o MOMENTUM
-    // (aceleração); o ADX não bloqueia mais a operação, apenas é exibido.
+    // 1. ADX — indicador VISUAL apenas. NÃO bloqueia a operação.
     const adx = calcADX(d);
     if (adx < adxMin) {
       console.log(
-        `[FLOW DIAG] V2 ===== ADX BAIXO (${adx.toFixed(1)} < ${adxMin}) — NAO BLOQUEIA; decisao por momentum/quadrante =====`,
+        `[FLOW DIAG] V2 ===== ADX BAIXO (${adx.toFixed(1)} < ${adxMin}) — NAO BLOQUEIA (informativo) =====`,
       );
     }
 
-    // 2. CICLO DETERMINÍSTICO de 5 velas — ancorado no FECHAMENTO das velas,
-    //    NÃO em contador mutável (que dessincroniza com a cadência do scan e
-    //    fazia o robô entrar na 3ª vela em vez da 4ª).
-    //    Passo = posição da vela no ciclo de 5, derivado do horário de fechamento.
-    //    Isso GARANTE que a entrada ocorra EXATAMENTE na 4ª vela do quadrante,
-    //    independente de quantas vezes o scan roda por vela.
+    // ══ [ALGORITMO DO QUADRANTE — COMENTADO/DESATIVADO] ══
+    // O ciclo determinístico de 5 velas (esperar a 4ª vela para entrar) NÃO é
+    // mais usado. A única estratégia ativa é a CONTINUIDADE: operar TODA vela
+    // seguinte com direção = cor da ÚLTIMA vela fechada; doji → pula.
+    // O cálculo abaixo sobrevive apenas como metadado de exibição do painel.
     const CYCLE_LEN = 5;
     const lastCandle = d[d.length - 1];
     const lastColor: "GREEN" | "RED" = lastCandle.close >= lastCandle.open ? "GREEN" : "RED";
 
-    // posição (0-based: 0..4) da última vela fechada dentro do ciclo de 5,
-    // ancorada no epoch (funciona para qualquer timeframe M/H de forma determinística).
-    const posInCycle = ((Math.floor(lastCandle.time / tfMs) % CYCLE_LEN) + CYCLE_LEN) % CYCLE_LEN;
-    const currentStep = (posInCycle + 1) as 1 | 2 | 3 | 4 | 5; // 1..5
+    // [DESATIVADO] posição da última fechada no ciclo de 5 (era o gatilho da 4ª vela):
+    // const posInCycle = ((Math.floor(lastCandle.time / tfMs) % CYCLE_LEN) + CYCLE_LEN) % CYCLE_LEN;
+    // const currentStep = (posInCycle + 1) as 1 | 2 | 3 | 4 | 5;
+    const currentStep =
+      ((Math.floor(lastCandle.time / tfMs) % CYCLE_LEN) + CYCLE_LEN) % CYCLE_LEN + 1;
 
-    // 1ª vela do quadrante = `posInCycle` candles antes da última (candle de INICIO).
-    // A cor dessa 1ª vela define a DIREÇÃO da entrada (CALL se verde, PUT se vermelha).
-    const firstIdx = Math.max(0, d.length - 1 - posInCycle);
-    const firstCandle = d[firstIdx];
-    const firstColor: "GREEN" | "RED" = firstCandle.close >= firstCandle.open ? "GREEN" : "RED";
+    // [DESATIVADO] cor da 1ª vela do quadrante (definia a direção no algoritmo antigo):
+    // const firstIdx = Math.max(0, d.length - 1 - posInCycle);
+    // const firstCandle = d[firstIdx];
+    // const firstColor: "GREEN" | "RED" = firstCandle.close >= firstCandle.open ? "GREEN" : "RED";
 
     console.log(
-      `[FLOW DIAG] V2 ===== CICLO ===== step=${currentStep} (time=${new Date(lastCandle.time).toISOString()}) color=${lastColor} primeiraVelaCor=${firstColor}`,
+      `[FLOW DIAG] V2 ===== CONTINUO ===== passoPainel=${currentStep} (fechamento=${new Date(lastCandle.time).toISOString()}) corUltimaFechada=${lastColor} — entrada TODA vela, direcao pela cor`,
     );
 
     // 3. Detectar sequência (Eixo X) — sobre velas fechadas
@@ -830,10 +828,11 @@ export class HybridProbabilityEngineV2 {
     // 5. Mapear quadrante
     const quadrant = mapQuadrant(seq.length, accel.accelerating);
 
-    // 6. Calcular probabilidade (quadrante) — a direção vem da COR DA 1ª VELA
-    //    do quadrante (regra do usuário: "entra na 4ª vela, direção = cor da 1ª").
+    // 6. Calcular probabilidade (quadrante) — CONTINUIDADE: a direção vem da
+    //    COR DA ÚLTIMA VELA FECHADA (verde→CALL, vermelha→PUT), vela a vela.
+    //    Win repete a cor; loss inverte — que na prática é sempre "cor da última".
     const { probability } = calcQuadrantProbability(quadrant, seq.color);
-    const direction: "CALL" | "PUT" = firstColor === "GREEN" ? "CALL" : "PUT";
+    const direction: "CALL" | "PUT" = lastColor === "GREEN" ? "CALL" : "PUT";
 
     // 7. Classificação
     let level: HybridProbabilityLevel;
@@ -842,41 +841,32 @@ export class HybridProbabilityEngineV2 {
     else if (probability >= minProb) level = "Boa";
     else level = "Bloqueado";
 
-    // ══ ENTRADA: obrigatoriamente no candle 4 (step === 4) ══
+    // ══ ESTRATÉGIA ÚNICA: CONTINUIDADE — ENTRAR TODA VELA SEGUINTE ══
+    // [ALGORITMO DO QUADRANTE COMENTADO — NÃO É MAIS USADO]
     // Regras do usuário:
-    //  - Entrada SÓ no candle 4 (ENTRADA). O ciclo de 5 velas é o gate rígido.
-    //  - ADX não bloqueia (apenas exibido).
-    //  - Momentum (aceleração) com limite relaxado p/ 1.02: passa quase sempre,
-    //    deixando de ser bloqueio real (apenas confirma tendência).
-    //  - Recuperação após LOSS no candle 4 é feita pelo sorosgale na vela 5
-    //    (flow-robot-engine), fora deste engine.
-    //  - TIMING: a entrada acontece na ABERTURA da 4ª vela. Como a decisão é
-    //    calculada sobre a vela FECHADA, ela deve ser tomada ao fechar a 3ª vela
-    //    (currentStep === 3) — assim o trade é enviado na abertura da 4ª. Se
-    //    esperássemos currentStep === 4, a abertura da 4ª já teria passado e o
-    //    robô nunca entraria (deadlock).
-    const momentumOk = accel.accelerating; // informativo (limite 1.02)
-    const stepOk = currentStep === 3; // decide na 3ª fechada → entra na 4ª
-    const entryCandleStep = 4; // vela-alvo da entrada (p/ exibição)
-    // Entrada OBRIGATÓRIA no candle 4: a ÚNICA condição real de bloqueio é a
-    // janela de entrada (candle 3 fechado). ADX, momentum e probabilidade do
-    // quadrante são informativos e NÃO bloqueiam a entrada neste candle —
-    // caso contrário o candle de entrada (3ª do quadrante) raramente passaria
-    // no filtro de probabilidade (Q3 = 50%) e o robô nunca entraria.
-    const canOperate = stepOk;
+    //  - Direção = cor da ÚLTIMA vela fechada (verde→CALL, vermelha→PUT).
+    //  - Doji na última fechada (abertura=fechamento) → PULA a vela seguinte.
+    //  - ADX e momentum são informativos e não bloqueiam.
+    //  - Antecipação T-10s (flow-robot-engine) decide cedo pelo preço ao vivo;
+    //    este gate é o fallback no fechamento.
+    // const momentumOk = accel.accelerating;   // [antigo] informativo
+    // const stepOk = currentStep === 3;        // [ANTIGO — desativado]
+    // const entryCandleStep = 4;               // [ANTIGO — desativado]
+    const isDoji = lastCandle.close === lastCandle.open;
+    const canOperate = !isDoji;
     const status: HybridProbabilityStatus = canOperate ? "liberado" : "bloqueado";
     const treeLabel = quadrantLabel(quadrant, seq.length, accel.accelerating);
 
     const blockedReasons: string[] = [];
-    if (!stepOk) {
-      blockedReasons.push(`Decisão de entrada ocorre ao fechar a 3ª vela (step atual ${currentStep}) — aguardando a 3ª para entrar na 4ª`);
+    if (isDoji) {
+      blockedReasons.push("Última vela fechada é doji (abertura=fechamento) — pulando esta vela");
     }
 
     console.log(
-      `[FLOW DIAG] V2 ===== QUADRANT RESULT ===== step=${currentStep} stepOk=${stepOk} momentumOk=${momentumOk} ratio=${accel.ratio.toFixed(2)} prob=${probability} quadrant=${quadrant} seq=${seq.length} color=${seq.color} direction=${direction} status=${status} adx=${adx.toFixed(1)}`,
+      `[FLOW DIAG] V2 ===== RESULTADO CONTINUO ===== doji=${isDoji} ratio=${accel.ratio.toFixed(2)} prob=${probability} direction=${direction} status=${status} adx=${adx.toFixed(1)} — sem esperar 4ª vela`,
     );
 
-    engineLogger.info("HybridProbability V2 (Quadrant)", "===== QUADRANT BREAKDOWN =====", {
+    engineLogger.info("HybridProbability V2 (Continuo)", "===== BREAKDOWN CONTINUO =====", {
       asset,
       quadrant,
       sequenceLength: seq.length,
@@ -925,8 +915,8 @@ export class HybridProbabilityEngineV2 {
     const confidenceScore = canOperate ? Math.min(95, 60 + Math.round(probability - minProb)) : 0;
 
     const reason = canOperate
-      ? `LIBERADO — Quadrante ${quadrant} | Prob ${probability}% | Dir ${direction} | Seq ${seq.length} ${seq.color} | ${accel.accelerating ? "Acelerando" : "Desacelerando"} | ADX ${adx.toFixed(1)} | entra na 4ª vela (decidido ao fechar a 3ª)`
-      : `BLOQUEADO — ${!stepOk ? `decidirá ao fechar a 3ª (step atual ${currentStep}) | ` : ""}${quadrant} prob ${probability}% ${probability < minProb ? `< ${minProb}%` : ""} | momentum ${momentumOk ? "OK" : "FRACO"}`;
+      ? `LIBERADO — Continuidade | Dir ${direction} (cor da última fechada ${lastColor}) | Quadrante ${quadrant} | Prob ${probability}% | ADX ${adx.toFixed(1)}`
+      : `BLOQUEADO — ${isDoji ? "doji na última fechada — pulando vela | " : ""}Quadrante ${quadrant} prob ${probability}% | aceleração ${accel.accelerating ? "OK" : "FRACA"}`;
 
     const signalStatus: SignalStatus = canOperate ? "APPROVED" : "TECHNICAL_REJECTION";
 
@@ -962,7 +952,7 @@ export class HybridProbabilityEngineV2 {
         detail: f.detail,
       })),
       candlesUsed: d.length,
-      cycleStep: stepOk ? entryCandleStep : currentStep,
+      cycleStep: currentStep, // apenas exibição (painel); não influencia a decisão
     };
   }
 

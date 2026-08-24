@@ -474,7 +474,10 @@ export class PumaSocketClient {
 
     const symbol = (data.symbol ?? data.s ?? "") as string;
     const price = parseFloat(String(data.price ?? data.p ?? "0"));
-    const time = (data.time ?? data.t ?? Date.now()) as number;
+    const rawTime = (data.time ?? data.t ?? Date.now()) as number;
+    // Servidor pode mandar segundos ou ms — normaliza como nos candles
+    const time =
+      typeof rawTime === "number" && rawTime > 0 && rawTime < 1e12 ? rawTime * 1000 : rawTime;
 
     if (symbol && price > 0) {
       this._onTick?.({

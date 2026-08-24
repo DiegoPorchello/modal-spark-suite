@@ -423,6 +423,21 @@ export class FlowRobotEngine {
   // ══ ANTECIPAÇÃO DE RECOVERY (vela 5) ══
   // Preço ao vivo cacheado via subscribePrices para prever LOSS ~5s antes do vencimento.
   private _priceCache: Record<string, { bid: number; ask: number; ts: number }> = {};
+
+  /**
+   * Rastreador de ticks da vela EM FORMAÇÃO (minuto corrente): primeiro e último
+   * preço recebido no minuto. Permite reconciliar a cor da vela que está
+   * fechando DE FORMA SÍNCRONA (zero latência) no instante da abertura.
+   */
+  private _tickTracker: {
+    minuteStart: number;
+    open: number;
+    last: number;
+    updated: number;
+  } | null = null;
+
+  /** Unsubscribe das atualizações da vela em formação (fonte primária da cor). */
+  private _candleUpdateUnsub: (() => void) | null = null;
   private _priceUnsub: (() => void) | null = null;
   private _anticipationTimer: ReturnType<typeof setTimeout> | null = null;
   // recovery antecipado já posicionado (previsto LOSS na vela 4 → recovery na vela 5)
@@ -442,7 +457,6 @@ export class FlowRobotEngine {
   private _lastSignalLogId: string | null = null;
 
   // ══ SOROSGALE TARGET: após loss, forçar entrada no mesmo par/direção ══
-  private _sorosgaleTarget: { asset: string; direction: "call" | "put"; timeframe: string } | null = null;
 
   private _logState(event: string, detail?: Record<string, unknown>): void {
     engineLogger.info("FlowRobot", `[STATE] ${event}`, {
@@ -717,6 +731,37 @@ export class FlowRobotEngine {
         : [this._state.config.asset];
     this._priceUnsub = this.broker.subscribePrices(priceAssets, (p) => {
       this._priceCache[p.asset] = { bid: p.bid, ask: p.ask, ts: p.timestamp ?? Date.now() };
+
+      // Rastreia primeiro/último tick do minuto → cor real da vela em formação
+      const px = p.bid > 0 ? p.bid : p.ask;
+      if (px > 0) {
+        const rawTs = p.timestamp ?? Date.now();
+        const ts = rawTs > 0 && rawTs < 1e12 ? rawTs * 1000 : rawTs;
+        const minute = Math.floor(ts / 60000) * 60000;
+        if (!this._tickTracker || this._tickTracker.minuteStart !== minute) {
+          this._tickTracker = { minuteStart: minute, open: px, last: px, updated: Date.now() };
+        } else {
+          this._tickTracker.last = px;
+          this._tickTracker.updated = Date.now();
+        }
+      }
+    });
+
+    // ══ FONTE PRIMÁRIA DA COR: atualizações da vela EM FORMAÇÃO ══
+    // O evento de candle carrega o OHLC REAL do gráfico (open/close evoluindo
+    // intra-minuto). Ticks podem não existir para ativos híbridos — candles não.
+    if (this._candleUpdateUnsub) this._candleUpdateUnsub();
+    this._candleUpdateUnsub = this.broker.subscribeCandleUpdate((candle) => {
+      if (candle.asset && candle.asset !== this._state.config.asset) return;
+      const rawTime = candle.time;
+      const time = rawTime > 0 && rawTime < 1e12 ? rawTime * 1000 : rawTime;
+      const minute = Math.floor(time / 60000) * 60000;
+      this._tickTracker = {
+        minuteStart: minute,
+        open: candle.open,
+        last: candle.close,
+        updated: Date.now(),
+      };
     });
 
     // Inicia ExecutionEngine (monitor de alta precisão 50ms)
@@ -925,7 +970,6 @@ export class FlowRobotEngine {
     this.smartRecovery.regenerateLevelTable();
     this.assetCooldowns.clear();
     this._globalCooldownUntil = 0;
-    this._sorosgaleTarget = null;
     this._sessionStarted = false;
     const sessionInfo = this.broker.getSessionInfo();
     this._state = this._buildInitialState(config, sessionInfo.currentSession, sessionInfo);
@@ -1232,7 +1276,7 @@ export class FlowRobotEngine {
     // _onCandleClose NÃO gera nextTrade — apenas sincroniza estado.
     // A decisão de trade é responsabilidade EXCLUSIVA de _onDecisionTime.
     // Isso elimina a race condition onde a análise pós-fechamento sobrescrevia
-    // a decisão tomada na janela de decisão (~200ms antes do fechamento).
+    // a decisão tomada na janela de decisão (~1.5s antes do fechamento).
     if (this._state.status === "running" && !this._state.activeOperation) {
       // Se há um nextTrade pendente definido por _onDecisionTime, não faz nada
       if (this._state.nextTrade?.valid) {
@@ -1259,7 +1303,7 @@ export class FlowRobotEngine {
   // ── ExecutionEngine Handlers ──
 
   /**
-   * Chamado pelo ExecutionEngine ~200ms antes do fechamento do candle.
+   * Chamado pelo ExecutionEngine ~1.5s antes do fechamento do candle.
    * Executa a análise FINAL (DecisionEngine + SmartRecovery) e armazena
    * o resultado como nextTrade para execução na abertura do candle.
    */
@@ -1313,12 +1357,18 @@ export class FlowRobotEngine {
         `[FLOW DIAG] ${_ts} ═══ _onDecisionTime chamado ═══ asset=${_asset} tf=${_tf} profile=${_profile} status=${this._state.status} session=${this._state.currentSession}`,
       );
 
-      if (this._state.status !== "running") {
+      // "waiting-result" É PERMITIDO: durante o voo da ordem a antecipação/
+      // gap-filler precisam enfileirar a próxima entrada. Status realmente
+      // inválidos (idle/stopped) continuam bloqueando.
+      if (
+        this._state.status !== "running" &&
+        this._state.status !== "waiting-result"
+      ) {
         console.log(
-          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: status !== "running" ═══ status=${this._state.status} asset=${this._state.config.asset}`,
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: status inválido ═══ status=${this._state.status} asset=${this._state.config.asset}`,
         );
         console.log(
-          "[DUPLICATE CHECK] _onDecisionTime ignored — status not running:",
+          "[DUPLICATE CHECK] _onDecisionTime ignored — invalid status:",
           this._state.status,
         );
         _exitLog("BLOCKED_STATUS", { status: this._state.status });
@@ -1334,12 +1384,12 @@ export class FlowRobotEngine {
         return;
       }
       engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU _isProcessing");
-      if (this._state.activeOperation) {
+      if (this._state.activeOperation && this._state.nextTrade?.valid) {
         console.log(
-          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: activeOperation pendente ═══ orderId=${this._state.activeOperation.orderId} asset=${this._state.config.asset}`,
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: activeOperation pendente (já enfileirada) ═══ orderId=${this._state.activeOperation.orderId} asset=${this._state.config.asset}`,
         );
-        engineLogger.info("FlowRobot", "Operação ativa pendente — pulando janela de decisão", {});
-        _exitLog("BLOCKED_ACTIVE_OP", { orderId: this._state.activeOperation.orderId });
+        engineLogger.info("FlowRobot", "Operação ativa com próxima entrada já enfileirada — pulando janela", {});
+        _exitLog("BLOCKED_ACTIVE_OP_QUEUED", { orderId: this._state.activeOperation.orderId });
         return;
       }
       engineLogger.info("FlowRobot", "[FLOW DIAG] PASSOU activeOperation");
@@ -1349,7 +1399,7 @@ export class FlowRobotEngine {
       tl.event("MUTEX_ACQUIRED");
 
       try {
-      engineLogger.info("FlowRobot", `═══ JANELA DE DECISÃO (~200ms antes do fechamento) ═══`, {});
+      engineLogger.info("FlowRobot", `═══ JANELA DE DECISÃO (~1.5s antes do fechamento) ═══`, {});
 
       // Risk checks rápidos
       const profit = this._state.currentBankroll - this._state.initialBankroll;
@@ -1468,87 +1518,19 @@ export class FlowRobotEngine {
         return;
       }
 
-      // ══ SOROSGALE: forçar entrada na próxima vela após LOSS ══
-      if (this._sorosgaleTarget && this._state.config.operationProfile === "HYBRID_PROBABILITY") {
-        const target = this._sorosgaleTarget;
-        engineLogger.info(
-          "FlowRobot",
-          `🎯 SOROSGALE DECISION TIME: forçando ${target.asset} ${target.direction.toUpperCase()} (level ${entrada.level})`,
-          {},
-        );
-
-        const selectedTimeframe = target.timeframe;
-        const expiration = TIMEFRAME_EXPIRATION_MAP[selectedTimeframe] ?? this._state.config.expirationSeconds;
-
-        // Buscar candles para obter entryPrice e análise atualizada
-        try {
-          const candles = await this.broker.getCandles(target.asset, selectedTimeframe, getFetchSize(this._state.config.operationProfile ?? "HYBRID_PROBABILITY"));
-          if (candles && candles.length >= getMinCandles(this._state.config.operationProfile ?? "HYBRID_PROBABILITY")) {
-            const decision = this.decisionEngine.analyze(candles, target.asset, {
-              operationProfile: this._state.config.operationProfile,
-              hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
-              timeframe: selectedTimeframe,
-            });
-            this._state.lastAnalysis = decision;
-            this._state.config.asset = target.asset;
-            this._state.selectedTimeframe = selectedTimeframe;
-
-            const entryPrice = candles[candles.length - 1].close;
-            const payout = await this.broker.getPayout(target.asset).catch(() => 0.85);
-
-            const did = this._nextDecisionId();
-            const traceId = `tr_soros_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            const nowTs = Date.now();
-            const signalCandle = candles[candles.length - 1];
-
-            const nextTrade: NextTrade = {
-              traceId,
-              decisionId: did,
-              symbol: target.asset,
-              direction: target.direction,
-              score: decision.scoreBreakdown?.total ?? 0,
-              amount: entrada.valor,
-              expiration,
-              entryPrice,
-              payout,
-              timeframe: selectedTimeframe,
-              valid: true,
-              decidedAt: nowTs,
-              signalCandleTime: signalCandle.time,
-              signalCandleOpen: signalCandle.open,
-              signalCandleClose: signalCandle.close,
-              candleId: `${target.asset}_${selectedTimeframe}_${signalCandle.time}`,
-            };
-
-            this.executionEngine.setNextTrade(nextTrade);
-            this._state.nextTrade = nextTrade;
-            this._state.currentEntry = entrada.valor;
-            this._state.entryNumber = entrada.entry;
-            this._isRecoveryTradePlaced = true;
-            this._recoveryPhase = true;
-            this._pendingRecoveryTraceId = traceId;
-            this._logState("SOROSGALE_NEXT_TRADE_SET", { direction: target.direction, score: nextTrade.score, stake: entrada.valor });
-            this._emit("state-changed");
-
-            // Limpa sorosgale target — já agendado
-            this._sorosgaleTarget = null;
-
-            engineLogger.info(
-              "FlowRobot",
-              `🎯 SOROSGALE NEXT_TRADE SET: ${target.asset} ${target.direction.toUpperCase()} stake=${entrada.valor} level=${entrada.level}`,
-              { decisionId: did, traceId },
-            );
-            _exitLog("APPROVED_SOROSGALE", { direction: target.direction, score: nextTrade.score });
-            return;
-          }
-        } catch (e) {
-          engineLogger.error("FlowRobot", `Erro no sorosgale decision time: ${target.asset}`, { error: String(e) });
-        }
-
-        // Se falhou, limpa target e segue fluxo normal
-        engineLogger.warn("FlowRobot", `🎯 SOROSGALE: falha ao buscar candles — limpando target, fluxo normal`);
-        this._sorosgaleTarget = null;
+      // ══ GAP-FILLER: operação em voo e SEM próxima entrada enfileirada ══
+      // A antecipação T-10s falhou (sem preço, abortada) ou o resultado
+      // oficial cancelou a fila. Enfileira AGORA para não perder a vela.
+      if (this._state.activeOperation) {
+        await this._queueGapFillEntry();
+        _exitLog("GAP_FILLED", {});
+        return;
       }
+
+      // ══ CONTINUIDADE: nada a forçar aqui — a próxima entrada já pode ter
+      // sido enfileirada pela antecipação T-10s (nextTrade válido, guard acima);
+      // caso contrário o fluxo normal abaixo decide pela cor da última vela
+      // fechada e o nível corrente do smartRecovery. ══
 
       // Health check pré-scan
       await this._runHealthCheck();
@@ -1560,7 +1542,7 @@ export class FlowRobotEngine {
       console.log(
         `[TIMING] BEFORE_ANALYZE asset=${this._state.config.asset} tsDate=${Date.now()} tsPerf=${performance.now().toFixed(2)}`
       );
-      const marketDir = await this._analyzeMarketDirection();
+      let marketDir = await this._analyzeMarketDirection();
       const msAnalyze = performance.now() - tAnalyze0;
       tl.event("ANALYZE", { direction: marketDir ?? "null" }, msAnalyze);
       engineLogger.info("FlowRobot", "===== AFTER ANALYZE =====", { direction: marketDir });
@@ -1640,6 +1622,23 @@ export class FlowRobotEngine {
         this._scheduleNextOperation(this._getIntervalSeconds(), "NO_SIGNAL");
         _exitLog("BLOCKED_NO_SIGNAL", {});
         return;
+      }
+
+      // ══ CONTINUIDADE: sobrepõe com a cor REAL da vela em formação ══
+      // A análise usa apenas velas fechadas (N-1); a entrada executa na
+      // abertura seguinte, cuja referência correta é a vela N que está
+      // fechando agora. Ticks dão essa cor de forma síncrona.
+      const formingDir = this._formingTickColor();
+      if (formingDir && formingDir !== marketDir) {
+        engineLogger.warn(
+          "FlowRobot",
+          `[CONTINUIDADE] Direção sobreposta pela vela em formação: ${marketDir.toUpperCase()} → ${formingDir.toUpperCase()}`,
+          {},
+        );
+        console.log(
+          `[CONTINUITY] DECISION_WINDOW_OVERRIDE analysis=${marketDir} forming=${formingDir}`,
+        );
+        marketDir = formingDir;
       }
 
       console.log(
@@ -1868,8 +1867,182 @@ export class FlowRobotEngine {
       precision: this._state.lastEntryPrecision,
     });
 
-    // NÃO recalcular nada aqui — apenas registrar
+    // ══ RECONCILIAÇÃO AUTORITATIVA DE DIREÇÃO (antes do envio) ══
+    // Este callback roda ANTES de ExecutionEngine enviar a ordem. A vela que
+    // ACABOU de fechar (time-60000) define a direção obrigatória da entrada
+    // ("cor da última vela fechada"). Usamos o rastreador de ticks — leitura
+    // síncrona, sem latência de rede.
+    const queued = this.executionEngine.nextTrade;
+    const trackerRaw = this._tickTracker;
+    const prevStart = time - 60000;
+    // Só confia se o dado pertence à vela que ACABOU de fechar (minuto exato).
+    // OHLC real vem dos eventos de candle do gráfico — não inventa direção.
+    const tr =
+      trackerRaw &&
+      trackerRaw.minuteStart === prevStart &&
+      trackerRaw.open > 0 &&
+      trackerRaw.last > 0
+        ? trackerRaw
+        : null;
+    if (queued?.valid) {
+      if (!tr) {
+        console.log(
+          `[CONTINUITY] CANDLE_OPEN_RECONCILE SKIP traceId=${queued.traceId} motivo=${!trackerRaw ? "sem_ticks" : trackerRaw.minuteStart !== prevStart ? "minuto_divergente" : "ticks_velhos"} mantendo=${queued.direction}`,
+        );
+      } else if (tr.open === tr.last) {
+        // Vela anterior fechou doji → PULA esta vela
+        this.executionEngine.clearNextTrade();
+        this._state.nextTrade = null;
+        engineLogger.warn(
+          "FlowRobot",
+          `[CONTINUIDADE] Vela anterior fechou doji (tick open=last=${tr.open}) — entrada cancelada, pulando vela`,
+          { traceId: queued.traceId },
+        );
+        console.log(
+          `[CONTINUITY] CANDLE_OPEN_RECONCILE motivo=DOJI_SKIP traceId=${queued.traceId} candle=${new Date(prevStart).toISOString()}`,
+        );
+      } else {
+        const expected: "call" | "put" = tr.last > tr.open ? "call" : "put";
+        console.log(
+          `[CONTINUITY] CANDLE_OPEN_RECONCILE prevCandle=${new Date(prevStart).toISOString()} tickOpen=${tr.open} tickLast=${tr.last} expected=${expected} queued=${queued.direction}`,
+        );
+        this._flipQueuedDirection(expected);
+      }
+    }
+
     this._emitAnalyst("candle.new", { symbol: this._state.config.asset, time });
+  }
+
+  /**
+   * Cor da vela EM FORMAÇÃO segundo o OHLC real do gráfico (eventos de candle).
+   * Só vale se o dado pertence ao minuto corrente — nunca adivinha com dado velho.
+   */
+  private _formingTickColor(): "call" | "put" | null {
+    const t = this._tickTracker;
+    if (!t || t.open <= 0 || t.last <= 0) return null;
+    const nowMinute = Math.floor(Date.now() / 60000) * 60000;
+    if (t.minuteStart !== nowMinute) return null; // não é a vela corrente
+    if (t.last === t.open) return null; // doji/sem definição ainda
+    return t.last > t.open ? "call" : "put";
+  }
+
+  /**
+   * Garante que a trade enfileirada siga a direção esperada ("cor da última
+   * vela fechada"). Se divergir, inverte direção + valor + flags de predição.
+   */
+  private _flipQueuedDirection(expected: "call" | "put"): void {
+    const queued = this.executionEngine.nextTrade;
+    if (!queued?.valid || !this._state.nextTrade) return;
+    if (queued.direction === expected) return;
+
+    const oldDir = queued.direction;
+    const isPredictionQueue =
+      this._pendingRecoveryTraceId !== null &&
+      this._pendingRecoveryTraceId === queued.traceId;
+    const wasPredictedLoss = isPredictionQueue && this._anticipatedLoss;
+
+    if (isPredictionQueue) {
+      // Predição invertida → stake e flags invertem junto
+      const newStake = wasPredictedLoss
+        ? this.smartRecovery.peekAfterWinStake()
+        : this.smartRecovery.peekRecoveryStake();
+      if (newStake > 0) queued.amount = newStake;
+      this._anticipatedLoss = !wasPredictedLoss;
+      this._recoveryPhase = !wasPredictedLoss;
+      this._isRecoveryTradePlaced = !wasPredictedLoss;
+    }
+
+    queued.direction = expected;
+    this._state.currentEntry = queued.amount;
+    this._logState("DIRECTION_RECONCILED", {
+      traceId: queued.traceId,
+      from: oldDir,
+      to: expected,
+      amount: queued.amount,
+      predictionQueue: isPredictionQueue,
+    });
+    this._emit("state-changed");
+    engineLogger.warn(
+      "FlowRobot",
+      `[CONTINUIDADE] Direção reconciliada na abertura: ${oldDir?.toUpperCase()} → ${expected.toUpperCase()} stake=${queued.amount}`,
+      { traceId: queued.traceId },
+    );
+  }
+
+  /**
+   * Enfileira a entrada da próxima abertura quando há operação em voo e a
+   * antecipação T-10s não conseguiu enfileirar (sem preço ao vivo, abortada
+   * ou cancelada pelo resultado oficial). Usa a cor real da vela em formação
+   * (ticks) e o nível corrente do smartRecovery.
+   */
+  private async _queueGapFillEntry(): Promise<void> {
+    try {
+      const asset = this._state.config.asset;
+      const direction = this._formingTickColor();
+      if (!direction) {
+        engineLogger.warn(
+          "FlowRobot",
+          "[GAP-FILL] Sem cor definida nos ticks — vela ficará sem entrada",
+          { asset },
+        );
+        return;
+      }
+      const entrada = this.smartRecovery.getEntry();
+      if (entrada.valor <= 0) {
+        engineLogger.warn("FlowRobot", "[GAP-FILL] Entrada inválida — vela ficará sem entrada", {
+          valor: entrada.valor,
+        });
+        return;
+      }
+      const timeframe =
+        this._state.selectedTimeframe ?? this._state.config.timeframes[0] ?? "M1";
+      const expiration =
+        TIMEFRAME_EXPIRATION_MAP[timeframe] ?? this._state.config.expirationSeconds ?? 60;
+      const payout = await Promise.race([
+        this.broker.getPayout(asset).catch(() => 0.85),
+        new Promise<number>((resolve) => setTimeout(() => resolve(0.85), 900)),
+      ]);
+      const did = this._nextDecisionId();
+      const traceId = `tr_gap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const nowTs = Date.now();
+      const tracker = this._tickTracker;
+      const nextTrade: NextTrade = {
+        traceId,
+        decisionId: did,
+        symbol: asset,
+        direction,
+        score: 0,
+        amount: entrada.valor,
+        expiration,
+        entryPrice: tracker?.last ?? 0,
+        payout,
+        timeframe,
+        valid: true,
+        decidedAt: nowTs,
+        signalCandleTime: tracker?.minuteStart ?? Math.floor(nowTs / 60000) * 60000,
+        signalCandleOpen: tracker?.open ?? 0,
+        signalCandleClose: tracker?.last ?? 0,
+        candleId: `${asset}_${timeframe}_gap_${nowTs}`,
+      };
+      this._isRecoveryTradePlaced = false;
+      this.executionEngine.setNextTrade(nextTrade);
+      this._state.nextTrade = nextTrade;
+      this._state.currentEntry = entrada.valor;
+      this._logState("GAP_FILL_ENTRY_SET", { direction, stake: entrada.valor });
+      this._emit("state-changed");
+      engineLogger.warn(
+        "FlowRobot",
+        `[GAP-FILL] Antecipação falhou — entrada enfileirada tardiamente: ${direction.toUpperCase()} stake=${entrada.valor}`,
+        { traceId },
+      );
+      console.log(
+        `[CONTINUITY] GAP_FILLED dir=${direction} stake=${entrada.valor} traceId=${traceId}`,
+      );
+    } catch (e) {
+      engineLogger.error("FlowRobot", "Erro no gap-fill da janela de decisão", {
+        error: String(e),
+      });
+    }
   }
 
   /**
@@ -1917,28 +2090,30 @@ export class FlowRobotEngine {
     this._logState("WAITING_RESULT", { orderId: operation.orderId });
     this._emit("operation-opened", operation);
 
-    // ══ ANTECIPAÇÃO DE RECOVERY (vela 5) ══
-    // Apenas para o trade PRIMÁRIO (vela 4). Se for recovery, não reagenda.
+    // ══ ANTECIPAÇÃO CONTÍNUA (T-10s de CADA trade em voo) ══
+    // Avalia preço ao vivo vs. ponto de entrada: prevendo WIN já enfileira a
+    // próxima entrada com o valor pós-win (entrada 1 → SOROS entrada 2;
+    // entrada 2 → base) e a cor prevista da vela; prevendo LOSS enfileira com
+    // o próximo nível e a cor oposta. O resultado oficial reconcilia depois.
     this._clearAnticipationTimer();
-    if (!this._isRecoveryTradePlaced) {
-      const openTime = record.sendTime;
-      const expiration = operation.expirationSeconds ?? 60;
-      const delayMs = Math.max(
-        1000,
-        (expiration - 5) * 1000 - (Date.now() - openTime),
+    const openTime = record.sendTime;
+    const expiration = operation.expirationSeconds ?? 60;
+    const ANTICIPATION_LEAD_SEC = 10;
+    const delayMs = Math.max(
+      1000,
+      (expiration - ANTICIPATION_LEAD_SEC) * 1000 - (Date.now() - openTime),
+    );
+    this._anticipationTimer = setTimeout(() => {
+      this._anticipationTimer = null;
+      this._runAnticipation(operation).catch((e) =>
+        engineLogger.error("FlowRobot", "Erro na anticipation", { error: String(e) }),
       );
-      this._anticipationTimer = setTimeout(() => {
-        this._anticipationTimer = null;
-        this._runAnticipation(operation).catch((e) =>
-          engineLogger.error("FlowRobot", "Erro na anticipation", { error: String(e) }),
-        );
-      }, delayMs);
-      engineLogger.info(
-        "FlowRobot",
-        `⏱️ ANTICIPATION agendada em ${Math.round(delayMs / 1000)}s para ${operation.asset} (vela 4)`,
-        {},
-      );
-    }
+    }, delayMs);
+    engineLogger.info(
+      "FlowRobot",
+      `⏱️ ANTICIPATION agendada em ${Math.round(delayMs / 1000)}s para ${operation.asset}`,
+      {},
+    );
 
     const tradeExpiration =
       this._state.nextTrade?.expiration ??
@@ -2046,11 +2221,14 @@ export class FlowRobotEngine {
         this._state.status = "running";
         persistOperations(this._state.operations);
         this._emit("operation-closed", operation);
+        // HYBRID_PROBABILITY: sem cooldown — continuidade vela a vela
         this._globalCooldownUntil =
-          Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+          this._state.config.operationProfile === "HYBRID_PROBABILITY"
+            ? 0
+            : Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
         engineLogger.info(
           "FlowRobot",
-          `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após UNKNOWN`,
+          `⏳ Cooldown global ${this._globalCooldownUntil > 0 ? `ativado por ${this._state.config.globalCooldownSec ?? 180}s` : "DESATIVADO (continuidade)"} após UNKNOWN`,
           {},
         );
         console.log("[EXECUTION QUEUE]", {
@@ -2082,11 +2260,14 @@ export class FlowRobotEngine {
         this._state.status = "running";
         persistOperations(this._state.operations);
         this._emit("operation-closed", operation);
+        // HYBRID_PROBABILITY: sem cooldown — continuidade vela a vela
         this._globalCooldownUntil =
-          Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+          this._state.config.operationProfile === "HYBRID_PROBABILITY"
+            ? 0
+            : Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
         engineLogger.info(
           "FlowRobot",
-          `⏳ Cooldown global ativado por ${this._state.config.globalCooldownSec ?? 180}s após DUPLICATA`,
+          `⏳ Cooldown global ${this._globalCooldownUntil > 0 ? `ativado por ${this._state.config.globalCooldownSec ?? 180}s` : "DESATIVADO (continuidade)"} após DUPLICATA`,
           {},
         );
         console.log("[EXECUTION QUEUE]", {
@@ -2132,18 +2313,15 @@ export class FlowRobotEngine {
         this._state.totalWins++;
 
         // Limpa sorosgale target — ciclo recuperado com WIN
-        this._sorosgaleTarget = null;
 
-        // Primário venceu mas um recovery foi antecipado (previsão errada de
-        // LOSS) — cancela a ordem na fila ANTES que ela dispare na vela 5.
+        // Fonte resolveu WIN com predição em curso:
+        //  - previa LOSS (errou) → cancela a enfileirada se ainda não enviou;
+        //  - previa WIN (confirmou) → a enfileirada vira continuação comum.
         if (this._pendingRecoveryTraceId && !isRecoveryRecord) {
-          this.executionEngine.clearNextTrade();
-          this._state.nextTrade = null;
-          engineLogger.info(
-            "FlowRobot",
-            `🎯 ANTICIPATION: primário venceu — recovery antecipado CANCELADO (${operation.asset})`,
-            {},
-          );
+          if (this._anticipatedLoss) {
+            this._cancelQueuedIfUnsent(`fonte ${operation.asset} venceu contra previsão`);
+          }
+          this._clearAnticipationFlags();
         }
 
         this._state.sessionProfit += operation.profit;
@@ -2198,58 +2376,31 @@ export class FlowRobotEngine {
           );
         }
 
-        // ══ SOROSGALE TARGET: definir alvo para próxima vela (apenas 1 tentativa) ══
-        let justSetSorosTarget = false;
+        // ══ CONTINUIDADE: reconcilia predição e segue vela a vela ══
+        // Sem sorosgale target: a direção da próxima entrada é a COR DA VELA
+        // PERDEDORA (decidida na janela de fechamento/antecipação) e o valor
+        // sobe de nível via registerLoss acima.
         if (this._state.config.operationProfile === "HYBRID_PROBABILITY") {
-          if (this._anticipatedLoss) {
-            // Recovery já foi antecipado na vela 5 (previsto LOSS ~5s antes do
-            // vencimento da vela 4). Não reagendar — a ordem já está na fila.
-            engineLogger.info(
-              "FlowRobot",
-              `🎯 ANTICIPATION: recovery já posicionado na vela 5 — pulando sorosgale target (${operation.asset})`,
-              {},
-            );
-            this._sorosgaleTarget = null;
-          } else if (isRecoveryRecord) {
-            // Este LOSS é da própria recovery (vela 5) — não reagenda. O reset do
-            // quadrante acontece no bloco final (independente de WIN/LOSS).
-            this._sorosgaleTarget = null;
-          } else if (this._sorosgaleTarget) {
-            // Já era sorosgale — loss na vela 5: encerra a tentativa de recovery
-            // e RESETA o quadrante (volta ao stake base) para o próximo ciclo.
-            engineLogger.info(
-              "FlowRobot",
-              `🎯 SOROSGALE: loss na vela 5 (${operation.asset}) — recovery encerrado, quadrante resetado (nível ${this.smartRecovery.getState().currentLevel} → 0)`,
-              {},
-            );
-            this._sorosgaleTarget = null;
-            this.smartRecovery.resetLevel();
+          if (this._pendingRecoveryTraceId && !isRecoveryRecord) {
+            if (!this._anticipatedLoss) {
+              // Previu WIN (errou): a enfileirada tem valor/direção errados.
+              this._cancelQueuedIfUnsent(`fonte ${operation.asset} perdeu contra previsão`);
+              this._clearAnticipationFlags();
+            } else {
+              // Loss previsto confirmado: recovery enfileirado segue.
+              engineLogger.info(
+                "FlowRobot",
+                `🎯 ANTICIPATION: loss confirmado — recovery enfileirado segue (${operation.asset}, nível ${this.smartRecovery.getState().currentLevel})`,
+                {},
+              );
+            }
           } else {
-            // Primeira perda (vela 4): define target para vela 5
-            this._sorosgaleTarget = {
-              asset: operation.asset,
-              direction: operation.direction.toLowerCase() as "call" | "put",
-              timeframe: operation.timeframe ?? this._state.selectedTimeframe ?? "M1",
-            };
-            justSetSorosTarget = true;
             engineLogger.info(
               "FlowRobot",
-              `🎯 SOROSGALE TARGET definido: ${operation.asset} ${operation.direction} (próxima vela)`,
+              `📉 CONTINUIDADE: próxima entrada na abertura da vela seguinte — cor da vela perdedora, nível ${this.smartRecovery.getState().currentLevel}`,
               {},
             );
           }
-        }
-
-        // Dispara a janela de decisão IMEDIATAMENTE para posicionar a recovery
-        // na vela seguinte (não espera o próximo candle-close, que empurraria a
-        // entrada mais uma vela adiante). _onDecisionTime possui o branch
-        // sorosgale que força a entrada ignorando o gate de step.
-        if (justSetSorosTarget && !this._anticipatedLoss) {
-          setTimeout(() => {
-            this._onDecisionTime().catch((err) =>
-              engineLogger.error("FlowRobot", "Erro ao disparar recovery sorosgale", { error: String(err) }),
-            );
-          }, 250);
         }
 
         this._state.sessionProfit -= operation.amount;
@@ -2279,16 +2430,12 @@ export class FlowRobotEngine {
           nextStake: this.smartRecovery.getCurrentStake(),
         });
         this._state.totalDraws++;
-        // DRAW no primário com recovery antecipado na fila — cancela (não há mais
-        // motivo para recovery: o primário não perdeu).
+        // Fonte resolveu DRAW com predição em curso — cancela a enfileirada
+        // (sem win/loss para recuperar; o fallback decide pela cor da vela) e
+        // encerra a predição.
         if (this._pendingRecoveryTraceId && !isRecoveryRecord) {
-          this.executionEngine.clearNextTrade();
-          this._state.nextTrade = null;
-          engineLogger.info(
-            "FlowRobot",
-            `🎯 ANTICIPATION: primário empatou — recovery antecipado CANCELADO (${operation.asset})`,
-            {},
-          );
+          this._cancelQueuedIfUnsent(`fonte ${operation.asset} empatou`);
+          this._clearAnticipationFlags();
         }
         this._state.currentEntry = this.smartRecovery.getCurrentStake();
         this._state.entryNumber = this.smartRecovery.getState().entryNumber;
@@ -2437,7 +2584,6 @@ export class FlowRobotEngine {
               },
             );
             this._stopByRisk(`IA: ${aiDecision.reason}`);
-            this._sorosgaleTarget = null;
             return;
           }
         }
@@ -2486,41 +2632,22 @@ export class FlowRobotEngine {
       // Agenda re-análise rápida durante o cooldown
       this._scheduleNextOperation(5, "COOLDOWN_ACTIVE");
 
-      // ══ RESET DE QUADRANTE (modelo: vela 4 → recovery vela 5 → recomeça) ══
-      // HYBRID_PROBABILITY: o ciclo é primário + no máx. 1 recovery, depois reinicia.
-      // REGRA: só reseta quando (a) o PRÓPRIO recovery resolveu, ou (b) primário WIN.
-      // Um LOSS do primário NUNCA reseta aqui — quem vem depois é o recovery,
-      // e é o resultado DELE que encerra o ciclo (evita rearme duplicado).
+      // ══ CONTINUIDADE: sem reset de quadrante ══
+      // Nível/entrada evoluem EXCLUSIVAMENTE via smartRecovery.registerWin/
+      // registerLoss/registerDraw. Aqui apenas higieniza marcadores residuais
+      // da predição e sincroniza os campos exibidos.
       if (this._state.config.operationProfile === "HYBRID_PROBABILITY") {
-        if (isRecoveryRecord) {
-          // O RECOVERY (vela 5) acabou de resolver → reseta sempre (WIN ou LOSS)
-          this.smartRecovery.resetLevel();
-          this._state.currentEntry = this.smartRecovery.getCurrentStake();
-          this._state.entryNumber = 1;
-          this._state.currentRecoveryStep = 0;
-          this._recoveryPhase = false;
-          this._anticipatedLoss = false;
-          this._isRecoveryTradePlaced = false;
-          this._pendingRecoveryTraceId = null;
-          this._sorosgaleTarget = null;
+        if (isRecoveryRecord || record.traceId === this._pendingRecoveryTraceId) {
+          this._clearAnticipationFlags();
           engineLogger.info(
             "FlowRobot",
-            `🎯 Recovery (vela 5) encerrado com ${record.result} — quadrante resetado`,
+            `🔁 CONTINUIDADE: trade enfileirada resolvida com ${record.result} — marcadores limpos`,
             {},
           );
-        } else if (isWin) {
-          // Primário WIN → também reinicia o quadrante (novo ciclo na próxima vela)
-          this.smartRecovery.resetLevel();
-          this._state.currentEntry = this.smartRecovery.getCurrentStake();
-          this._state.entryNumber = 1;
-          this._state.currentRecoveryStep = 0;
-          this._anticipatedLoss = false;
-          this._isRecoveryTradePlaced = false;
-          this._pendingRecoveryTraceId = null;
-          this._sorosgaleTarget = null;
-          engineLogger.info("FlowRobot", "🎯 Primary WIN — quadrante resetado (novo ciclo)", {});
         }
-        // Primário LOSS sem recovery resolvido: flags intactos de propósito.
+        this._state.currentEntry = this.smartRecovery.getCurrentStake();
+        this._state.entryNumber = this.smartRecovery.getState().entryNumber;
+        this._state.currentRecoveryStep = this.smartRecovery.getState().currentLevel;
       }
     } catch (err) {
       this._state.activeOperation = null;
@@ -2534,7 +2661,11 @@ export class FlowRobotEngine {
         error: String(err),
         tradeId: record.tradeId,
       });
-      this._globalCooldownUntil = Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
+      // HYBRID_PROBABILITY: sem cooldown — continuidade vela a vela
+      this._globalCooldownUntil =
+        this._state.config.operationProfile === "HYBRID_PROBABILITY"
+          ? 0
+          : Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
       this._scheduleNextOperation(5, "COOLDOWN_ACTIVE");
     } finally {
       if (this._state.status === "waiting-result") {
@@ -3164,64 +3295,8 @@ export class FlowRobotEngine {
 
     const profile = this.state.config.operationProfile ?? "AUTO";
 
-    // ══ SOROSGALE MODE: forçar entrada no mesmo par/direção ══
-    if (this._sorosgaleTarget && profile === "HYBRID_PROBABILITY") {
-      const target = this._sorosgaleTarget;
-      engineLogger.info(
-        "FlowRobot",
-        `🎯 SOROSGALE SCAN: forçando ${target.asset} ${target.direction.toUpperCase()}`,
-        {},
-      );
-
-      // Scan apenas o alvo no timeframe do sorosgale
-      const targetAssets = [target.asset];
-      const targetTimeframes = [target.timeframe];
-
-      for (const asset of targetAssets) {
-        for (const tf of targetTimeframes) {
-          try {
-            const candles = await this.broker.getCandles(asset, tf, getFetchSize(profile));
-            if (!candles || candles.length < getMinCandles(profile)) continue;
-
-            const decision = this.decisionEngine.analyze(candles, asset, {
-              operationProfile: profile,
-              hybridProbabilityConfig: this.state.config.hybridProbabilityConfig,
-              timeframe: tf,
-            });
-
-            // No sorosgale, aceitar qualquer direção (mesmo que bloqueado)
-            // desde que tenha uma direção definida
-            if (decision.direction) {
-              const direction = decision.direction.toLowerCase() as "call" | "put";
-              // Forçar direção do sorosgale (mesma do trade anterior)
-              bestCandidate = {
-                asset,
-                direction: target.direction, // Força direção do target, não do decision
-                decision,
-                timeframe: tf,
-              };
-              engineLogger.info(
-                "FlowRobot",
-                `🎯 SOROSGALE CANDIDATE: ${asset} ${target.direction.toUpperCase()} (tf=${tf})`,
-                {},
-              );
-            }
-          } catch (e) {
-            engineLogger.error("FlowRobot", `Erro no sorosgale scan: ${asset} ${tf}`, { error: String(e) });
-          }
-        }
-      }
-
-      // Limpa o target após tentar
-      if (!bestCandidate) {
-        engineLogger.warn("FlowRobot", `🎯 SOROSGALE: ${target.asset} sem dados suficientes — limpando target`);
-        this._sorosgaleTarget = null;
-      }
-    }
-
     // Filter assets by profile: HYBRID_PROBABILITY only scans selected hybrid asset
-    const scanAssets = !this._sorosgaleTarget
-      ? (profile === "HYBRID_PROBABILITY"
+    const scanAssets = profile === "HYBRID_PROBABILITY"
         ? (() => {
             const selected = this.hybridCatalogEngine.getSelectedAsset();
             if (selected) {
@@ -3231,8 +3306,7 @@ export class FlowRobotEngine {
             // Fallback: todos os híbridos se nenhum foi selecionado
             return assets.filter((a) => HYBRID_PUMA_ASSETS.has(a.toUpperCase()));
           })()
-        : assets)
-      : [];
+        : assets;
 
     const totalCatalogTargets = scanAssets.length * timeframes.length;
     let scannedCount = 0;
@@ -4004,7 +4078,6 @@ export class FlowRobotEngine {
     this._state.status = "stopped";
     this._state.activeOperation = null;
     this._state.lastError = message;
-    this._sorosgaleTarget = null;
     this._emit("stopped-by-risk", undefined, message);
   }
 
@@ -4300,8 +4373,46 @@ export class FlowRobotEngine {
     }
   }
 
-  /** Retorna o preço ao vivo mais recente do ativo (cache de tick ou candle). */
+  /** Limpa os marcadores da predição/antecipação em curso. */
+  private _clearAnticipationFlags(): void {
+    this._anticipatedLoss = false;
+    this._recoveryPhase = false;
+    this._isRecoveryTradePlaced = false;
+    this._pendingRecoveryTraceId = null;
+  }
+
+  /**
+   * Cancela a trade enfileirada por predição APENAS se ela ainda não foi
+   * enviada (ExecutionEngine ainda o segura pendente).
+   */
+  private _cancelQueuedIfUnsent(reason: string): void {
+    const queuedId = this._pendingRecoveryTraceId;
+    if (!queuedId) return;
+    if (this.executionEngine.nextTrade?.traceId === queuedId) {
+      this.executionEngine.clearNextTrade();
+      this._state.nextTrade = null;
+      engineLogger.info(
+        "FlowRobot",
+        `🎯 ANTICIPATION: enfileirada cancelada — ${reason}`,
+        { queuedId },
+      );
+    }
+  }
+
+  /** Retorna o preço ao vivo mais recente do ativo (vela corrente → tick → candle). */
   private async _getLivePrice(asset: string): Promise<number | null> {
+    // 1º: close real da vela em formação (eventos de candle do gráfico)
+    const t = this._tickTracker;
+    const nowMinute = Math.floor(Date.now() / 60000) * 60000;
+    if (
+      asset === this._state.config.asset &&
+      t &&
+      t.minuteStart === nowMinute &&
+      t.last > 0 &&
+      Date.now() - t.updated < 20000
+    ) {
+      return t.last;
+    }
     const cached = this._priceCache[asset];
     if (cached && cached.bid > 0 && Date.now() - cached.ts < 10000) return cached.bid;
     try {
@@ -4315,13 +4426,20 @@ export class FlowRobotEngine {
   }
 
   /**
-   * ~5s antes do vencimento da vela 4, olha o preço ao vivo vs. o preço de
-   * abertura (referência do trade binário). Se claramente a caminho de LOSS,
-   * antecipa o recovery na vela 5 (sem esperar o resultado oficial, que chega
-   * ~2s APÓS a abertura da vela 5 e empurraria a entrada para a vela 6).
+   * ~10s antes do fechamento da vela da trade em voo, avalia o preço ao vivo
+   * vs. o ponto de entrada e JÁ PREPARA a próxima entrada (modelo contínuo):
+   *  - Posição FAVORÁVEL (win previsto) → enfileira com peekAfterWinStake()
+   *    (win na entrada 1 ⇒ SOROS entrada 2; win na entrada 2 ⇒ base) e a cor
+   *    prevista da vela = direção da própria trade.
+   *  - Posição DESFAVORÁVEL (loss previsto) → enfileira com peekRecoveryStake()
+   *    (próximo nível) e a cor prevista da vela perdedora = OPOSTA à trade.
+   * O resultado oficial chega depois e reconcilia níveis; contradição antes do
+   * envio cancela a enfileirada (registerResult).
    */
   private async _runAnticipation(primaryOp: RobotOperation): Promise<void> {
-    if (this._state.status !== "running") return;
+    // A antecipação roda DURANTE o voo da trade (status "waiting-result") —
+    // bloquear aqui matava a cadeia e o robô só reentrava na vela seguinte.
+    if (this._state.status !== "running" && this._state.status !== "waiting-result") return;
     if (this._state.nextTrade) {
       engineLogger.warn("FlowRobot", "ANTICIPATION: já existe nextTrade — abortando", {});
       return;
@@ -4331,43 +4449,54 @@ export class FlowRobotEngine {
     const entryPrice = primaryOp.entryPrice;
     const live = await this._getLivePrice(asset);
     if (live == null) {
-      engineLogger.warn("FlowRobot", "ANTICIPATION: sem preço ao vivo — abortando", { asset });
+      engineLogger.warn("FlowRobot", "ANTICIPATION: sem preço ao vivo — fallback no fechamento", { asset });
       return;
     }
-    // Pequena margem para evitar falsos LOSS quando o preço está no limite
+    // Pequena margem para evitar falsos sinais quando o preço está no limite
     const buffer = Math.max(entryPrice * 0.0005, 1e-6);
-    let predictedLoss = false;
+    let favorable: boolean;
     if (direction === "call") {
-      predictedLoss = live < entryPrice - buffer;
+      favorable = live > entryPrice + buffer;
     } else {
-      predictedLoss = live > entryPrice + buffer;
-    }
-    if (!predictedLoss) {
-      engineLogger.info(
-        "FlowRobot",
-        `ANTICIPATION: ${asset} ${direction} parece WIN (live=${live.toFixed(5)} vs entry=${entryPrice.toFixed(5)}) — sem recovery antecipado`,
-        {},
-      );
-      return;
+      favorable = live < entryPrice - buffer;
     }
     engineLogger.info(
       "FlowRobot",
-      `🎯 ANTICIPATION: ${asset} ${direction} previsto LOSS (live=${live.toFixed(5)} vs entry=${entryPrice.toFixed(5)}) — antecipando recovery na vela 5`,
+      `🎯 ANTICIPATION: ${asset} ${direction} ${favorable ? "WIN" : "LOSS"} previsto (live=${live.toFixed(5)} vs entry=${entryPrice.toFixed(5)}) — preparando próxima entrada`,
       {},
     );
-    await this._placeAnticipatedRecovery(primaryOp);
+    await this._queueNextEntry(primaryOp, favorable ? "WIN" : "LOSS", live);
   }
 
-  /** Posiciona a trade de recovery na vela 5 usando o stake de recuperação. */
-  private async _placeAnticipatedRecovery(primaryOp: RobotOperation): Promise<void> {
+  /**
+   * Enfileira a próxima entrada (abertura da vela seguinte) com base na
+   * predição T-10s: valor pós-win ou próximo nível, e a cor prevista da vela.
+   * A direção enfileirada é reconciliada na abertura contra os ticks reais
+   * (_onExecutionCandleOpen → _flipQueuedDirection), garantindo a regra
+   * "cor da última vela fechada" mesmo se a predição falhar.
+   */
+  private async _queueNextEntry(
+    primaryOp: RobotOperation,
+    predicted: "WIN" | "LOSS",
+    livePrice: number,
+  ): Promise<void> {
     try {
       const asset = primaryOp.asset;
-      const direction = primaryOp.direction;
-      const recoveryStake = this.smartRecovery.peekRecoveryStake();
-      if (recoveryStake <= 0) return;
+      const direction: "call" | "put" =
+        predicted === "WIN"
+          ? primaryOp.direction
+          : primaryOp.direction === "call"
+            ? "put"
+            : "call";
+      const stake =
+        predicted === "WIN"
+          ? this.smartRecovery.peekAfterWinStake()
+          : this.smartRecovery.peekRecoveryStake();
+      if (stake <= 0) return;
       const expiration = primaryOp.expirationSeconds ?? 60;
       const timeframe = primaryOp.timeframe ?? "M1";
-      const entryPrice = (await this._getLivePrice(asset)) ?? primaryOp.entryPrice;
+      const entryPrice =
+        livePrice > 0 ? livePrice : ((await this._getLivePrice(asset)) ?? primaryOp.entryPrice);
       const payout = await this.broker.getPayout(asset).catch(() => primaryOp.payout ?? 0.85);
       const did = this._nextDecisionId();
       const traceId = `tr_anticip_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -4378,7 +4507,7 @@ export class FlowRobotEngine {
         symbol: asset,
         direction,
         score: 0,
-        amount: recoveryStake,
+        amount: stake,
         expiration,
         entryPrice,
         payout,
@@ -4390,24 +4519,30 @@ export class FlowRobotEngine {
         signalCandleClose: entryPrice,
         candleId: `${asset}_${timeframe}_anticip_${nowTs}`,
       };
-      this._isRecoveryTradePlaced = true;
-      this._recoveryPhase = true;
-      this._anticipatedLoss = true;
+      if (predicted === "LOSS") {
+        this._isRecoveryTradePlaced = true;
+        this._recoveryPhase = true;
+        this._anticipatedLoss = true;
+      }
       this._pendingRecoveryTraceId = traceId;
       this.executionEngine.setNextTrade(nextTrade);
       this._state.nextTrade = nextTrade;
-      this._state.currentEntry = recoveryStake;
-      this._state.entryNumber = 1;
-      this._state.currentRecoveryStep = 1;
-      this._logState("ANTICIPATED_RECOVERY_SET", { direction, stake: recoveryStake });
+      this._state.currentEntry = stake;
+      this._logState("ANTICIPATED_NEXT_ENTRY_SET", {
+        predicted,
+        direction,
+        stake,
+        level: this.smartRecovery.getState().currentLevel,
+        entryNumber: this.smartRecovery.getState().entryNumber,
+      });
       this._emit("state-changed");
       engineLogger.info(
         "FlowRobot",
-        `🎯 RECOVERY ANTECIPADO (vela 5): ${asset} ${direction.toUpperCase()} stake=${recoveryStake}`,
+        `🎯 PRÓXIMA ENTRADA ENFILEIRADA (${predicted}): ${asset} ${direction.toUpperCase()} stake=${stake}`,
         { decisionId: did, traceId },
       );
     } catch (e) {
-      engineLogger.error("FlowRobot", "Erro ao antecipar recovery", { error: String(e) });
+      engineLogger.error("FlowRobot", "Erro ao antecipar próxima entrada", { error: String(e) });
     }
   }
 

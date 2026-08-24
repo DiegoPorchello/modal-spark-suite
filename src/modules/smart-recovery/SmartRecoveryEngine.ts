@@ -328,6 +328,25 @@ export class SmartRecoveryEngine {
     return row ? row.entry1 : c.initialStake;
   }
 
+  /**
+   * Stake da PRÓXIMA entrada SEM mutar o estado, assumindo que a operação
+   * em voo será WIN (usado pela antecipação T-5s).
+   * - Win na entrada 1 → entra a entrada 2 (SOROS) do mesmo nível;
+   * - Win na entrada 2 → ciclo completo, volta ao nível 0 / entrada 1.
+   */
+  peekAfterWinStake(): number {
+    const c = this.cfg();
+    if (this.state.entryNumber === 1) {
+      const row = this.calculator.getLevelRow(
+        Math.max(0, Math.min(this.state.currentLevel, this.state.levelTable.length - 1)),
+        this.state.levelTable,
+      );
+      return row ? row.entry2 : this.peekRecoveryStake();
+    }
+    const row0 = this.calculator.getLevelRow(0, this.state.levelTable);
+    return row0 ? row0.entry1 : c.initialStake;
+  }
+
   getEntry(): SorosGaleEntry {
     const c = this.cfg();
     if (!this.state.levelTable || this.state.levelTable.length === 0) {
