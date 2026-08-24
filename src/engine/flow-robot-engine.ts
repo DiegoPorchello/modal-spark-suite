@@ -404,6 +404,11 @@ export class FlowRobotEngine {
   private _candleCloseUnsub: (() => void) | null = null;
   private _sessionUnsub: (() => void) | null = null;
   private assetCooldowns: Map<string, number> = new Map();
+
+  // ══ RE-CATALOGAÇÃO POR LOSS STREAK ══
+  // 3 losses seguidos → nova catalogação para migrar ao par mais assertivo.
+  private _recatalogInProgress = false;
+  private _recatalogTriggeredForStreak = false;
   private _balanceRefreshTimer: ReturnType<typeof setInterval> | null = null;
   private _balanceSource: "REAL" | "MOCK" = "MOCK";
   private _lastBalanceSync: number = 0;
@@ -724,28 +729,7 @@ export class FlowRobotEngine {
     );
 
     // Inscreve em preços ao vivo (usado pela antecipação de recovery na vela 5)
-    if (this._priceUnsub) this._priceUnsub();
-    const priceAssets =
-      this._state.config.assets && this._state.config.assets.length
-        ? this._state.config.assets
-        : [this._state.config.asset];
-    this._priceUnsub = this.broker.subscribePrices(priceAssets, (p) => {
-      this._priceCache[p.asset] = { bid: p.bid, ask: p.ask, ts: p.timestamp ?? Date.now() };
-
-      // Rastreia primeiro/último tick do minuto → cor real da vela em formação
-      const px = p.bid > 0 ? p.bid : p.ask;
-      if (px > 0) {
-        const rawTs = p.timestamp ?? Date.now();
-        const ts = rawTs > 0 && rawTs < 1e12 ? rawTs * 1000 : rawTs;
-        const minute = Math.floor(ts / 60000) * 60000;
-        if (!this._tickTracker || this._tickTracker.minuteStart !== minute) {
-          this._tickTracker = { minuteStart: minute, open: px, last: px, updated: Date.now() };
-        } else {
-          this._tickTracker.last = px;
-          this._tickTracker.updated = Date.now();
-        }
-      }
-    });
+    this._subscribeLivePrices();
 
     // ══ FONTE PRIMÁRIA DA COR: atualizações da vela EM FORMAÇÃO ══
     // O evento de candle carrega o OHLC REAL do gráfico (open/close evoluindo
@@ -2333,6 +2317,8 @@ export class FlowRobotEngine {
         this._state.currentEntry = winStake;
         this._state.entryNumber = this.smartRecovery.getState().entryNumber;
         this._state.currentRecoveryStep = winLevelDepois;
+        // WIN encerra o loss streak → reabilita gatilho de re-catalogação
+        this._recatalogTriggeredForStreak = false;
         this._emitAnalyst("trade.win", { profit: operation.profit });
       } else if (isLoss) {
         operation.result = "loss";
@@ -2413,6 +2399,17 @@ export class FlowRobotEngine {
         this._state.entryNumber = this.smartRecovery.getState().entryNumber;
         this._state.currentRecoveryStep = this.smartRecovery.getState().currentLevel;
         this._emitAnalyst("trade.loss", { loss: operation.amount });
+
+        // ══ RE-CATALOGAÇÃO: 3 losses seguidos → novo par mais assertivo ══
+        const lossStreakAgora = this.smartRecovery.getState().consecutiveLosses;
+        if (
+          this._state.config.operationProfile === "HYBRID_PROBABILITY" &&
+          lossStreakAgora >= 3 &&
+          !this._recatalogTriggeredForStreak
+        ) {
+          this._recatalogTriggeredForStreak = true;
+          this._runRecatalogation(lossStreakAgora);
+        }
       } else {
         console.log(
           `[DEBUG-TRADE] 🤖 flow-robot-engine: DRAW branch taken! finalStatus was="${finalStatus}", isWin=${isWin}, isLoss=${isLoss}`,
@@ -4216,6 +4213,123 @@ export class FlowRobotEngine {
         error: String(err),
       });
     }
+  }
+
+  /**
+   * Inscreve nos preços ao vivo dos ativos relevantes (antecipação de recovery
+   * na vela 5 + rastreador de cor da vela em formação). Reutilizável: chamada
+   * no startup e após troca de par via re-catalogação.
+   */
+  private _subscribeLivePrices(): void {
+    if (this._priceUnsub) this._priceUnsub();
+    const configured =
+      this._state.config.assets && this._state.config.assets.length
+        ? this._state.config.assets
+        : [this._state.config.asset];
+    // Sempre inclui o ativo corrente (pode ter sido alterado em runtime)
+    const priceAssets = Array.from(new Set([...configured, this._state.config.asset]));
+    this._priceUnsub = this.broker.subscribePrices(priceAssets, (p) => {
+      this._priceCache[p.asset] = { bid: p.bid, ask: p.ask, ts: p.timestamp ?? Date.now() };
+
+      // Rastreia primeiro/último tick do minuto → cor real da vela em formação.
+      // FILTRO OBRIGATÓRIO POR ATIVO: o broker emite preços de todos os
+      // símbolos do stream — sem este guard, outros pares sobrescrevem o
+      // rastreador e a reconciliação de direção usa a cor do par ERRADO.
+      if (p.asset !== this._state.config.asset) return;
+      const px = p.bid > 0 ? p.bid : p.ask;
+      if (px > 0) {
+        const rawTs = p.timestamp ?? Date.now();
+        const ts = rawTs > 0 && rawTs < 1e12 ? rawTs * 1000 : rawTs;
+        const minute = Math.floor(ts / 60000) * 60000;
+        if (!this._tickTracker || this._tickTracker.minuteStart !== minute) {
+          this._tickTracker = { minuteStart: minute, open: px, last: px, updated: Date.now() };
+        } else {
+          this._tickTracker.last = px;
+          this._tickTracker.updated = Date.now();
+        }
+      }
+    });
+  }
+
+  /**
+   * ══ RE-CATALOGAÇÃO PÓS-LOSS STREAK ══
+   * Após 3 losses seguidos, recataloga os 5 ativos híbridos e migra o robô
+   * para o par mais assertivo do momento (mesma catalogação do startup).
+   */
+  private _runRecatalogation(lossStreak: number): void {
+    if (this._recatalogInProgress) return;
+    this._recatalogInProgress = true;
+
+    const assetAnterior = this._state.config.asset;
+    engineLogger.info(
+      "FlowRobot",
+      `═══ RE-CATALOGAÇÃO DISPARADA: ${lossStreak} losses seguidos em ${assetAnterior} ═══`,
+      { lossStreak, assetAnterior },
+    );
+    this._emitDiaryEntry(
+      `${lossStreak} losses seguidos em ${assetAnterior} — re-catalogando os pares para migrar ao mais assertivo.`,
+      "🔄",
+      "warning",
+    );
+
+    this.hybridCatalogEngine
+      .catalogAllAssets(async (asset) => {
+        return this.broker.getCandles(asset, "M1", 500);
+      })
+      .then((catalogState) => {
+        this._recatalogInProgress = false;
+        const novoAsset = catalogState.selectedAsset;
+
+        if (!novoAsset) {
+          engineLogger.warn("FlowRobot", "Re-catalogação não retornou par selecionado", {});
+          return;
+        }
+
+        if (novoAsset === assetAnterior) {
+          engineLogger.info(
+            "FlowRobot",
+            `🔄 RE-CATALOGAÇÃO: ${assetAnterior} segue sendo o par mais assertivo (assert=${catalogState.assertiveness.toFixed(1)})`,
+            { selectedAsset: novoAsset },
+          );
+          this._emitDiaryEntry(
+            `Re-catalogação concluída: ${assetAnterior} segue sendo o par mais assertivo.`,
+            "📌",
+            "info",
+          );
+          return;
+        }
+
+        // Migra o robô para o novo par (ciclo de velas é reiniciado pelo catálogo)
+        this._cancelQueuedIfUnsent(`re-catalogação: migração de ${assetAnterior} para ${novoAsset}`);
+        this._state.config.asset = novoAsset;
+        this.assetCooldowns.delete(assetAnterior);
+        this.assetCooldowns.delete(novoAsset);
+        this._subscribeLivePrices();
+
+        engineLogger.info(
+          "FlowRobot",
+          `🔄 RE-CATALOGAÇÃO CONCLUÍDA: ${assetAnterior} → ${novoAsset} (assert=${catalogState.assertiveness.toFixed(1)}, WR=${catalogState.winRate.toFixed(1)}%)`,
+          {
+            previousAsset: assetAnterior,
+            selectedAsset: novoAsset,
+            assertiveness: catalogState.assertiveness,
+            winRate: catalogState.winRate,
+          },
+        );
+        this._emitDiaryEntry(
+          `Novo par mais assertivo: ${novoAsset} (assertividade ${catalogState.assertiveness.toFixed(1)}%). Robô migrado de ${assetAnterior}.`,
+          "✅",
+          "success",
+        );
+        this._emit("state-changed");
+      })
+      .catch((err) => {
+        this._recatalogInProgress = false;
+        engineLogger.warn("FlowRobot", "Re-catalogação pós-loss falhou — mantendo par atual", {
+          error: String(err),
+          asset: assetAnterior,
+        });
+      });
   }
 
   private _emitDiaryEntry(
