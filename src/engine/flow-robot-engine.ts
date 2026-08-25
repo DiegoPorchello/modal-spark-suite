@@ -79,7 +79,6 @@ export type ScheduleReason =
   | "OPERATION_FINISHED"
   | "SESSION_CHANGED"
   | "ERROR_RETRY"
-  | "ENTRY_ERROR"
   | "INSUFFICIENT_DATA"
   | "OUTSIDE_SESSION"
   | "POST_TRADE"
@@ -539,7 +538,6 @@ export class FlowRobotEngine {
       onDecisionTime: () => this._onDecisionTime(),
       onCandleOpen: (time) => this._onExecutionCandleOpen(time),
       onEntry: (record) => this._onEntryExecuted(record),
-      onEntryError: (error, trade) => this._onEntryError(error, trade),
       onPhaseChange: (phase) => {
         this._state.executionPhase = phase;
         this._emit("state-changed");
@@ -1488,34 +1486,13 @@ export class FlowRobotEngine {
 
       // Se já temos nextTrade válido (definido pelo ciclo anterior), não recalcula
       if (this._state.nextTrade?.valid) {
-        const queued = this._state.nextTrade;
-        const expectedExecCandle = Math.floor(queued.decidedAt / 60000) * 60000 + 60000;
-        const clockNow = this.executionEngine.clock.now;
-        if (clockNow > expectedExecCandle + 3000) {
-          // Fila ÓRFÃ: deveria ter virado ordem na abertura da vela seguinte e
-          // não virou (dessincronismo entre _state e ExecutionEngine). Descarta
-          // e segue para decisão nova — sem isso o robô trava para sempre no
-          // "nextTrade já válido" sem nunca mais enviar ordem.
-          engineLogger.warn(
-            "FlowRobot",
-            `[CONTINUIDADE] Fila órfã descartada traceId=${queued.traceId} dir=${queued.direction} amount=${queued.amount} decidida=${new Date(queued.decidedAt).toISOString()} execEsperada=${new Date(expectedExecCandle).toISOString()}`,
-            {},
-          );
-          console.log(
-            `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ FILA ÓRFÃ descartada ═══ traceId=${queued.traceId} dir=${queued.direction} asset=${this._state.config.asset}`,
-          );
-          this.executionEngine.clearNextTrade();
-          this._state.nextTrade = null;
-          this._clearAnticipationFlags();
-        } else {
-          engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: payout");
-          console.log(
-            `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: nextTrade já válido ═══ direction=${this._state.nextTrade.direction} asset=${this._state.config.asset}`,
-          );
-          engineLogger.info("FlowRobot", "NextTrade já definido — mantendo decisão anterior", {});
-          _exitLog("BLOCKED_DUPLICATE", { nextDirection: this._state.nextTrade.direction });
-          return;
-        }
+        engineLogger.warn("FlowRobot", "[FLOW DIAG] BLOQUEADO: payout");
+        console.log(
+          `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ BLOQUEADO: nextTrade já válido ═══ direction=${this._state.nextTrade.direction} asset=${this._state.config.asset}`,
+        );
+        engineLogger.info("FlowRobot", "NextTrade já definido — mantendo decisão anterior", {});
+        _exitLog("BLOCKED_DUPLICATE", { nextDirection: this._state.nextTrade.direction });
+        return;
       }
 
       // Get entry params
@@ -2128,44 +2105,6 @@ export class FlowRobotEngine {
    * Chamado pelo ExecutionEngine após a ordem ser executada.
    * Atualiza estado do robô com o resultado da execução.
    */
-  /**
-   * Falha no envio da ordem pelo ExecutionEngine (erro do broker/rede).
-   * O ExecutionEngine limpa a cópia dele, mas SEM este handler o
-   * _state.nextTrade ficava órfão válido para sempre: toda decisão morria no
-   * "nextTrade já válido" e nenhuma ordem voltava a ser enviada.
-   */
-  private _onEntryError(error: string, trade: NextTrade): void {
-    engineLogger.error(
-      "FlowRobot",
-      "═══ FALHA NO ENVIO DA ORDEM — limpando fila ═══",
-      {
-        traceId: trade.traceId,
-        symbol: trade.symbol,
-        direction: trade.direction,
-        amount: trade.amount,
-        error,
-      },
-    );
-    console.log(
-      `[FLOW DIAG] ${new Date().toLocaleTimeString("pt-BR")} ═══ ENTRY_ERROR ═══ traceId=${trade.traceId} dir=${trade.direction} amount=${trade.amount} erro=${String(error).slice(0, 160)}`,
-    );
-    this._state.activeOperation = null;
-    this.executionEngine.clearNextTrade();
-    this._state.nextTrade = null;
-    this._clearAnticipationFlags();
-    this._emitDiaryEntry(
-      `Falha ao enviar ordem ${trade.direction.toUpperCase()} de $${trade.amount} em ${trade.symbol}: ${String(error).slice(0, 140)} — nova análise no próximo ciclo.`,
-      "⚠️",
-      "error",
-    );
-    // HYBRID_PROBABILITY: sem cooldown — continuidade vela a vela
-    this._globalCooldownUntil =
-      this._state.config.operationProfile === "HYBRID_PROBABILITY"
-        ? 0
-        : Date.now() + (this._state.config.globalCooldownSec ?? 180) * 1000;
-    this._scheduleNextOperation(5, "ENTRY_ERROR");
-  }
-
   private async _onEntryExecuted(record: EntryRecord): Promise<void> {
     engineLogger.info("FlowRobot", `═══ ORDEM EXECUTADA PELO EXECUTION ENGINE ═══`, {
       tradeId: record.tradeId,
